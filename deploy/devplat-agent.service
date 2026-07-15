@@ -1,0 +1,20 @@
+[Unit]
+Description=devplat-agent — Firecracker microVM orchestration
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/opt/devplat/agent/.env
+ExecStart=/usr/local/bin/devplat-agent
+# Needs /dev/kvm, network admin (tap devices, iptables, tc) and cgroup
+# writes — root, not a jailer/sandbox, for this first build step. Running
+# in Docker is deliberately avoided (see the main README): KVM-in-Docker
+# adds complexity this use case doesn't need.
+User=root
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

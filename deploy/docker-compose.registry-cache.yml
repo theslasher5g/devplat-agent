@@ -1,0 +1,44 @@
+# Pull-through registry cache — one instance per host (Host A, Host B, ...),
+# per the architecture note in the work order: there is currently no shared
+# egress via the VPS, so each host pulls (and caches) independently over its
+# own internet connection.
+#
+# `registry:2` in proxy mode caches at the layer level (its default
+# behaviour), so images sharing base layers (postgres:15/16, etc.) benefit
+# automatically without any image-specific configuration.
+#
+# Deploy: this is the first thing that needs Docker on Host A/B — the
+# devplat-agent binary itself runs directly on the host (see the main
+# README), not in a container.
+#
+#   docker compose -f docker-compose.registry-cache.yml up -d
+#
+# Requires a paid Docker Hub account (Docker Pro or better) to raise the
+# pull-rate limit that's already been hit once during initial VPS setup —
+# see .env.example for the two env vars this expects.
+
+services:
+  registry-cache:
+    image: registry:2
+    restart: unless-stopped
+    ports:
+      # Bound to all interfaces (not just the WireGuard IP): every VM on
+      # this host reaches it at its own gateway IP (a distinct address per
+      # VM slot — see internal/vmmanager/network.go), so the daemon can't
+      # be pinned to one address. It's still only reachable from inside the
+      # host's own VM network (the tap subnets) or from the host itself —
+      # nothing routes to it from the public internet, since none of the
+      # tap subnets are exposed there.
+      - "5000:5000"
+    environment:
+      REGISTRY_PROXY_REMOTEURL: https://registry-1.docker.io
+      REGISTRY_PROXY_USERNAME: ${DOCKERHUB_USERNAME}
+      REGISTRY_PROXY_PASSWORD: ${DOCKERHUB_TOKEN}
+      # Layers are cached to disk indefinitely by default; without a TTL
+      # this container's disk would only grow. 168h = 7 days.
+      REGISTRY_PROXY_TTL: 168h
+    volumes:
+      - registry-cache-data:/var/lib/registry
+
+volumes:
+  registry-cache-data:
