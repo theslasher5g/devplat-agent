@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
 	models "github.com/firecracker-microvm/firecracker-go-sdk/client/models"
@@ -113,6 +114,22 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 		fmt.Printf("[vmmanager] warning: failed to add pid %d to cgroup for %s: %v\n", pid, vm.ID, err)
 	}
 
+	// Start() only means the Firecracker process launched and the guest
+	// kernel began booting — not that init.sh has run, containerd is up,
+	// and dockerd is actually listening. Returning success (and a
+	// docker_endpoint) before that point hands the scheduler an endpoint
+	// that isn't ready yet: the client's first request lands mid-boot and
+	// gets nothing back (an abrupt EOF, not a clean refusal), even though
+	// the VM comes up fine a couple seconds later. Dial the guest directly
+	// on the tap network (no DNAT/WireGuard hop needed, this host owns
+	// that link) until dockerd answers, so "assigned" actually means ready.
+	if err := waitForDockerReady(ctx, nc.GuestIP, 20*time.Second); err != nil {
+		_ = machine.StopVMM()
+		_ = teardownFirewall(b.cfg, nc)
+		_ = teardownTapDevice(nc)
+		return fmt.Errorf("boot vm: %w", err)
+	}
+
 	b.mu.Lock()
 	b.machines[vm.ID] = machine
 	b.mu.Unlock()
@@ -120,6 +137,30 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 	vm.Pid = pid
 	vm.DockerEndpoint = fmt.Sprintf("%s:%d", hostPublicIP(b.cfg), nc.DockerPort)
 	return nil
+}
+
+// waitForDockerReady polls the guest's Docker port directly over the tap
+// link until it accepts a TCP connection or timeout elapses.
+func waitForDockerReady(ctx context.Context, guestIP net.IP, timeout time.Duration) error {
+	addr := net.JoinHostPort(guestIP.String(), "2375")
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return fmt.Errorf("guest docker daemon at %s not ready after %s: %w", addr, timeout, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 func (b *FirecrackerBackend) Stop(ctx context.Context, vm *VM) error {
