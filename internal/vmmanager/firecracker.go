@@ -52,8 +52,19 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 
 	socketPath := filepath.Join(b.cfg.VMStateDir, vm.ID, "firecracker.sock")
 	logPath := filepath.Join(b.cfg.VMStateDir, vm.ID, "firecracker.log")
+	consolePath := filepath.Join(b.cfg.VMStateDir, vm.ID, "console.log")
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o755); err != nil {
 		return fmt.Errorf("create vm state dir: %w", err)
+	}
+	// LogPath (below) is Firecracker's own VMM-level log, not the guest's
+	// serial console — despite what the KernelArgs comment used to imply,
+	// ttyS0 output was never actually captured anywhere: VMCommandBuilder
+	// doesn't wire stdout/stderr unless told to, so it was silently
+	// discarded. That's the only place init.sh's own output (or a guest
+	// kernel panic) would show up, so wire it to a real file.
+	consoleFile, err := os.OpenFile(consolePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("open console log: %w", err)
 	}
 
 	fcCfg := firecracker.Config{
@@ -61,9 +72,11 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 		LogPath:         logPath,
 		LogLevel:        "Warning",
 		KernelImagePath: b.cfg.KernelImagePath,
-		// console on ttyS0 for boot-failure debugging via the log; reboot=k
-		// makes a guest kernel panic kill the VM instead of looping, so the
-		// reaper doesn't have to distinguish "slow" from "stuck".
+		// console on ttyS0 — Firecracker writes that to its own process
+		// stdout/stderr (wired to consoleFile below), for boot-failure
+		// debugging; reboot=k makes a guest kernel panic kill the VM
+		// instead of looping, so the reaper doesn't have to distinguish
+		// "slow" from "stuck".
 		KernelArgs: "console=ttyS0 reboot=k panic=1 pci=off",
 		Drives: []models.Drive{{
 			DriveID:      ptrString("rootfs"),
@@ -91,19 +104,26 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 	cmd := firecracker.VMCommandBuilder{}.
 		WithBin(b.cfg.FirecrackerBinary).
 		WithSocketPath(socketPath).
+		WithStdout(consoleFile).
+		WithStderr(consoleFile).
 		Build(ctx)
 
 	machine, err := firecracker.NewMachine(ctx, fcCfg, firecracker.WithProcessRunner(cmd))
 	if err != nil {
+		_ = consoleFile.Close()
 		_ = teardownFirewall(b.cfg, nc)
 		_ = teardownTapDevice(nc)
 		return fmt.Errorf("configure machine: %w", err)
 	}
 	if err := machine.Start(ctx); err != nil {
+		_ = consoleFile.Close()
 		_ = teardownFirewall(b.cfg, nc)
 		_ = teardownTapDevice(nc)
 		return fmt.Errorf("start machine: %w", err)
 	}
+	// From here the subprocess owns its own duplicated stdout/stderr fds —
+	// safe to close our handle without affecting what it writes.
+	_ = consoleFile.Close()
 
 	pid, err := machine.PID()
 	if err != nil {
