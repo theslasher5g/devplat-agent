@@ -5,26 +5,23 @@
 # (StaticNetworkConfiguration) already bring up eth0 with a static IP before
 # userspace starts, via the kernel's IP autoconfiguration — nothing to do
 # here for networking.
-#
-# Whatever stdio the kernel hands PID 1 was silently swallowing every
-# echo here (nothing showed up on the Firecracker console log even with
-# checkpoints on the very first line) — force a fresh, explicit fd to
-# /dev/console instead of trusting the inherited one. The kernel's own
-# devtmpfs auto-mount runs before PID 1 starts, so /dev/console already
-# exists at this point.
-exec > /dev/console 2>&1
-
 set -e
 
-echo "init.sh: starting"
-
 mount -t proc proc /proc
-echo "init.sh: /proc mounted"
 mount -t sysfs sysfs /sys
-echo "init.sh: /sys mounted"
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 mkdir -p /dev/pts && mount -t devpts devpts /dev/pts 2>/dev/null || true
-echo "init.sh: /dev ready"
+
+# Whatever stdio the kernel handed PID 1 was silently swallowing every
+# echo here (nothing showed up on the Firecracker console log even with
+# a checkpoint on the very first line) — force a fresh, explicit fd to
+# /dev/console instead of trusting the inherited one. This has to come
+# AFTER the mounts above, not before: an earlier attempt put it first
+# and got the same silence, because /dev isn't guaranteed populated
+# (and /dev/console with it) until the devtmpfs mount above actually
+# runs — there's no guarantee the kernel auto-mounted it already.
+exec > /dev/console 2>&1
+echo "init.sh: starting, /dev/console redirect active"
 
 # The registry pull-through-cache lives on the host, reachable at this VM's
 # default gateway (the tap device's host-side IP — see devplat-agent's
