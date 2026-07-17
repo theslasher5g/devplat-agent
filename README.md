@@ -36,12 +36,16 @@ Each VM gets its own tap device and a private point-to-point `/30`:
   (`BANDWIDTH_CAP_MBIT`). No egress allowlist/blocklist yet — flagged as a
   known gap below, matching the work order's "first cut" scope (a bandwidth
   cap + blocking unsolicited inbound is what was asked for).
-- **Capacity**: `slots = min(floor(cpu / VM_VCPUS), floor((ram - HOST_RESERVED_RAM_MB) / VM_RAM_MB))`,
-  computed from the host's actual detected CPU count and `/proc/meminfo`.
-  When registering a host via `devplat-backend`'s `POST /admin/hosts`, use
-  this same post-reservation number for `cpuTotal`/`ramTotalMb` — the
-  scheduler's own accounting needs to agree with what this agent reports on
-  `GET /health`, or the two will drift.
+- **Capacity**: a raw resource budget, not a fixed count of equal slots. VMs
+  are now variable-sized — each `POST /vms` carries `vcpu`/`ram_mb` (the
+  requesting team's plan cap, set by the scheduler), and a VM is admitted only
+  if `sum(running vcpu) + vcpu ≤ detected_cpu` **and**
+  `sum(running ram) + ram_mb ≤ detected_ram − HOST_RESERVED_RAM_MB`. The slot
+  index (for tap/network derivation) is still assigned lowest-free, bounded by
+  the CPU count. When registering a host via `devplat-backend`'s
+  `POST /admin/hosts`, use the post-reservation capacity for
+  `cpuTotal`/`ramTotalMb` — the scheduler's own accounting needs to agree with
+  what this agent reports on `GET /health`, or the two will drift.
 
 ## Storage
 

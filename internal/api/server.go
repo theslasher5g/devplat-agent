@@ -60,6 +60,11 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 type createVMRequest struct {
 	TeamID     string `json:"team_id"`
 	TTLMinutes int    `json:"ttl_minutes"`
+	// Hard per-VM resource caps, set by the scheduler from the requesting
+	// team's plan. Required — the agent refuses a VM with no explicit size
+	// rather than silently falling back to a default it can't account for.
+	Vcpu  int64 `json:"vcpu"`
+	RamMb int64 `json:"ram_mb"`
 }
 
 func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
@@ -76,11 +81,15 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "team_id_required")
 		return
 	}
+	if req.Vcpu <= 0 || req.RamMb <= 0 {
+		writeError(w, http.StatusBadRequest, "vcpu_and_ram_mb_required")
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
 	defer cancel()
 
-	vm, err := s.manager.Create(ctx, req.TeamID, req.TTLMinutes)
+	vm, err := s.manager.Create(ctx, req.TeamID, req.TTLMinutes, req.Vcpu, req.RamMb)
 	if err != nil {
 		if errors.Is(err, vmmanager.ErrNoCapacity) {
 			writeError(w, http.StatusConflict, "no_capacity")

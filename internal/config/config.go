@@ -32,8 +32,11 @@ type Config struct {
 	FirecrackerBinary string
 	VMStateDir        string // per-VM sockets/rootfs/logs live under here
 
-	VMVcpus int64
-	VMRamMb int64
+	// Per-VM sizing (vCPU/RAM) is NOT configured here — it arrives on each
+	// POST /vms request as the requesting team's plan cap, set by the
+	// scheduler (see devplat-backend's plans table / allocator). This agent
+	// only enforces the host-wide resource budget below.
+	//
 	// HostReservedRamMb is subtracted from detected physical RAM before
 	// computing VM capacity — headroom for the host OS, the registry cache
 	// container, and this agent itself.
@@ -113,18 +116,6 @@ func Load() (Config, error) {
 		return cfg, err
 	}
 	cfg.HeartbeatInterval = time.Duration(heartbeatSeconds) * time.Second
-
-	vmVcpus, err := intEnv("VM_VCPUS", 1)
-	if err != nil {
-		return cfg, err
-	}
-	cfg.VMVcpus = int64(vmVcpus)
-
-	vmRamMb, err := intEnv("VM_RAM_MB", 2048)
-	if err != nil {
-		return cfg, err
-	}
-	cfg.VMRamMb = int64(vmRamMb)
 
 	hostReserved, err := intEnv("HOST_RESERVED_RAM_MB", 8192)
 	if err != nil {

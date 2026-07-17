@@ -81,8 +81,8 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 			},
 		}},
 		MachineCfg: models.MachineConfiguration{
-			VcpuCount:  ptrInt64(b.cfg.VMVcpus),
-			MemSizeMib: ptrInt64(b.cfg.VMRamMb),
+			VcpuCount:  ptrInt64(vm.Vcpu),
+			MemSizeMib: ptrInt64(vm.RamMb),
 		},
 		VMID: vm.ID,
 	}
@@ -107,7 +107,7 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 	pid, err := machine.PID()
 	if err != nil {
 		fmt.Printf("[vmmanager] warning: could not get PID for %s, cgroup limits not applied: %v\n", vm.ID, err)
-	} else if cgroupPath, cgErr := createCgroup(vm.ID, b.cfg.VMVcpus, b.cfg.VMRamMb); cgErr != nil {
+	} else if cgroupPath, cgErr := createCgroup(vm.ID, vm.Vcpu, vm.RamMb); cgErr != nil {
 		fmt.Printf("[vmmanager] warning: cgroup setup failed for %s: %v\n", vm.ID, cgErr)
 	} else if err := addProcessToCgroup(cgroupPath, pid); err != nil {
 		fmt.Printf("[vmmanager] warning: failed to add pid %d to cgroup for %s: %v\n", pid, vm.ID, err)

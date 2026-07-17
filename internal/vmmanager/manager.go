@@ -25,6 +25,8 @@ type VM struct {
 	ID             string        `json:"id"`
 	TeamID         string        `json:"team_id"`
 	Slot           int           `json:"slot"`
+	Vcpu           int64         `json:"vcpu"`   // hard cap from the requesting team's plan
+	RamMb          int64         `json:"ram_mb"` // hard cap from the requesting team's plan
 	DockerEndpoint string        `json:"docker_endpoint"`
 	Pid            int           `json:"pid"`
 	CreatedAt      time.Time     `json:"created_at"`
@@ -108,22 +110,44 @@ func (m *Manager) persist(vm *VM) error {
 	return os.WriteFile(filepath.Join(dir, "meta.json"), data, 0o644)
 }
 
-func (m *Manager) capacitySlots() int {
-	cpuTotal := detectCPUTotal()
-	ramTotal := detectRamTotalMb() - m.cfg.HostReservedRamMb
-	if ramTotal < 0 {
-		ramTotal = 0
+// capacityCPU / capacityRAMMb are the host-wide resource budgets a VM's
+// requested size is admitted against. VMs are now variable-sized (per the
+// requesting team's plan), so capacity is a raw CPU/RAM budget rather than a
+// fixed count of equal slots.
+func (m *Manager) capacityCPU() int64 { return detectCPUTotal() }
+
+func (m *Manager) capacityRAMMb() int64 {
+	ram := detectRamTotalMb() - m.cfg.HostReservedRamMb
+	if ram < 0 {
+		ram = 0
 	}
-	byCPU := int(cpuTotal / m.cfg.VMVcpus)
-	byRAM := int(ramTotal / m.cfg.VMRamMb)
-	if byCPU < byRAM {
-		return byCPU
-	}
-	return byRAM
+	return ram
 }
 
+// usedCPULocked / usedRAMMbLocked sum committed resources across running VMs.
+// Callers must hold m.mu.
+func (m *Manager) usedCPULocked() int64 {
+	var sum int64
+	for _, vm := range m.vms {
+		sum += vm.Vcpu
+	}
+	return sum
+}
+
+func (m *Manager) usedRAMMbLocked() int64 {
+	var sum int64
+	for _, vm := range m.vms {
+		sum += vm.RamMb
+	}
+	return sum
+}
+
+// freeSlot returns the lowest unused slot index (for tap/network derivation).
+// The ceiling is capacityCPU(): since every VM needs at least 1 vCPU, the host
+// can never run more concurrent VMs than it has CPUs, so that's a safe upper
+// bound on distinct slot indices. Callers must hold m.mu.
 func (m *Manager) freeSlot() (int, bool) {
-	max := m.capacitySlots()
+	max := int(m.capacityCPU())
 	for i := 0; i < max; i++ {
 		if _, taken := m.slots[i]; !taken {
 			return i, true
@@ -136,12 +160,21 @@ func newVMID() string {
 	return fmt.Sprintf("vm_%d", time.Now().UnixNano())
 }
 
-func (m *Manager) Create(ctx context.Context, teamID string, ttlMinutes int) (*VM, error) {
+func (m *Manager) Create(ctx context.Context, teamID string, ttlMinutes int, vcpu, ramMb int64) (*VM, error) {
 	if ttlMinutes <= 0 {
 		ttlMinutes = m.cfg.DefaultTTLMinutes
 	}
+	if vcpu <= 0 || ramMb <= 0 {
+		return nil, fmt.Errorf("vcpu and ram_mb must be positive (got %d vcpu, %d MB)", vcpu, ramMb)
+	}
 
 	m.mu.Lock()
+	// Admit against the host-wide resource budget: this VM's requested size
+	// plus everything already running must fit within CPU and RAM capacity.
+	if m.usedCPULocked()+vcpu > m.capacityCPU() || m.usedRAMMbLocked()+ramMb > m.capacityRAMMb() {
+		m.mu.Unlock()
+		return nil, ErrNoCapacity
+	}
 	slot, ok := m.freeSlot()
 	if !ok {
 		m.mu.Unlock()
@@ -151,6 +184,8 @@ func (m *Manager) Create(ctx context.Context, teamID string, ttlMinutes int) (*V
 		ID:        newVMID(),
 		TeamID:    teamID,
 		Slot:      slot,
+		Vcpu:      vcpu,
+		RamMb:     ramMb,
 		CreatedAt: time.Now(),
 		TTL:       time.Duration(ttlMinutes) * time.Minute,
 	}
@@ -244,12 +279,14 @@ type HealthStatus struct {
 func (m *Manager) Health() HealthStatus {
 	m.mu.Lock()
 	active := len(m.vms)
+	usedCPU := m.usedCPULocked()
+	usedRAM := m.usedRAMMbLocked()
 	m.mu.Unlock()
 	return HealthStatus{
-		CPUTotal:      int64(m.capacitySlots()) * m.cfg.VMVcpus,
-		CPUUsed:       int64(active) * m.cfg.VMVcpus,
-		RAMTotalMb:    int64(m.capacitySlots()) * m.cfg.VMRamMb,
-		RAMUsedMb:     int64(active) * m.cfg.VMRamMb,
+		CPUTotal:      m.capacityCPU(),
+		CPUUsed:       usedCPU,
+		RAMTotalMb:    m.capacityRAMMb(),
+		RAMUsedMb:     usedRAM,
 		ActiveVMCount: active,
 	}
 }

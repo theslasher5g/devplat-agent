@@ -42,8 +42,6 @@ func testConfig(t *testing.T) config.Config {
 	return config.Config{
 		VMStateDir:        t.TempDir(),
 		GoldenImagePath:   writeGoldenImage(t),
-		VMVcpus:           1,
-		VMRamMb:           2048,
 		HostReservedRamMb: 0,
 		DefaultTTLMinutes: 60,
 		TapIPBase:         net.ParseIP("172.20.0.0").To4(),
@@ -84,7 +82,7 @@ func TestCreate_AllocatesUniqueSlots(t *testing.T) {
 
 	seen := map[int]bool{}
 	for i := 0; i < 4; i++ {
-		vm, err := m.Create(context.Background(), "team-1", 60)
+		vm, err := m.Create(context.Background(), "team-1", 60, 1, 2048)
 		if err != nil {
 			t.Fatalf("Create %d: %v", i, err)
 		}
@@ -94,11 +92,52 @@ func TestCreate_AllocatesUniqueSlots(t *testing.T) {
 		seen[vm.Slot] = true
 	}
 
-	if _, err := m.Create(context.Background(), "team-1", 60); err != ErrNoCapacity {
+	if _, err := m.Create(context.Background(), "team-1", 60, 1, 2048); err != ErrNoCapacity {
 		t.Fatalf("expected ErrNoCapacity on the 5th VM, got %v", err)
 	}
 	if backend.bootCalls != 4 {
 		t.Fatalf("expected 4 boot calls, got %d", backend.bootCalls)
+	}
+}
+
+func TestCreate_AdmitsByRawResourcesNotSlotCount(t *testing.T) {
+	// 4 vCPU / 8 GB host. VMs sized 2 vCPU / 4 GB (a "Solo"-tier VM) — only
+	// TWO fit by CPU and by RAM, even though there are 4 CPUs, because
+	// capacity is now a raw resource budget, not a fixed count of 1-vCPU slots.
+	withDetectedHost(t, 4, 8192)
+	cfg := testConfig(t)
+	m, err := New(cfg, &fakeBackend{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		if _, err := m.Create(context.Background(), "team-1", 60, 2, 4096); err != nil {
+			t.Fatalf("Create %d (2vcpu/4GB): %v", i, err)
+		}
+	}
+	if _, err := m.Create(context.Background(), "team-1", 60, 2, 4096); err != ErrNoCapacity {
+		t.Fatalf("expected ErrNoCapacity on the 3rd 2vcpu/4GB VM, got %v", err)
+	}
+	// A 1-vCPU/2 GB VM still doesn't fit — RAM is fully committed (2×4 GB = 8 GB).
+	if _, err := m.Create(context.Background(), "team-1", 60, 1, 2048); err != ErrNoCapacity {
+		t.Fatalf("expected ErrNoCapacity when RAM is exhausted, got %v", err)
+	}
+}
+
+func TestCreate_RejectsVMLargerThanHost(t *testing.T) {
+	withDetectedHost(t, 4, 8192)
+	m, err := New(testConfig(t), &fakeBackend{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// 6 vCPU requested on a 4-CPU host — must be refused, not clamped.
+	if _, err := m.Create(context.Background(), "team-1", 60, 6, 4096); err != ErrNoCapacity {
+		t.Fatalf("expected ErrNoCapacity for an oversized VM, got %v", err)
+	}
+	// Zero/negative sizing is a bad request, not a capacity problem.
+	if _, err := m.Create(context.Background(), "team-1", 60, 0, 2048); err == nil || err == ErrNoCapacity {
+		t.Fatalf("expected a validation error for vcpu=0, got %v", err)
 	}
 }
 
@@ -111,11 +150,11 @@ func TestDestroy_FreesSlotForReuse(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	vm1, err := m.Create(context.Background(), "team-1", 60)
+	vm1, err := m.Create(context.Background(), "team-1", 60, 1, 2048)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, err := m.Create(context.Background(), "team-1", 60); err != ErrNoCapacity {
+	if _, err := m.Create(context.Background(), "team-1", 60, 1, 2048); err != ErrNoCapacity {
 		t.Fatalf("expected ErrNoCapacity, got %v", err)
 	}
 
@@ -126,7 +165,7 @@ func TestDestroy_FreesSlotForReuse(t *testing.T) {
 		t.Fatalf("expected 1 stop call, got %d", backend.stopCalls)
 	}
 
-	vm2, err := m.Create(context.Background(), "team-2", 60)
+	vm2, err := m.Create(context.Background(), "team-2", 60, 1, 2048)
 	if err != nil {
 		t.Fatalf("Create after Destroy: %v", err)
 	}
@@ -144,7 +183,7 @@ func TestReapExpired_DestroysOnlyOverdueVMs(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	expired, err := m.Create(context.Background(), "team-1", 60)
+	expired, err := m.Create(context.Background(), "team-1", 60, 1, 2048)
 	if err != nil {
 		t.Fatalf("Create expired vm: %v", err)
 	}
@@ -154,7 +193,7 @@ func TestReapExpired_DestroysOnlyOverdueVMs(t *testing.T) {
 	m.vms[expired.ID].CreatedAt = m.vms[expired.ID].CreatedAt.Add(-2 * time.Hour)
 	m.mu.Unlock()
 
-	fresh, err := m.Create(context.Background(), "team-1", 60)
+	fresh, err := m.Create(context.Background(), "team-1", 60, 1, 2048)
 	if err != nil {
 		t.Fatalf("Create fresh vm: %v", err)
 	}
@@ -176,7 +215,7 @@ func TestReconcile_RecoversStateAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	vm, err := m1.Create(context.Background(), "team-1", 60)
+	vm, err := m1.Create(context.Background(), "team-1", 60, 1, 2048)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
