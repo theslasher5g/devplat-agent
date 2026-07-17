@@ -5,6 +5,15 @@
 # (StaticNetworkConfiguration) already bring up eth0 with a static IP before
 # userspace starts, via the kernel's IP autoconfiguration — nothing to do
 # here for networking.
+#
+# Whatever stdio the kernel hands PID 1 was silently swallowing every
+# echo here (nothing showed up on the Firecracker console log even with
+# checkpoints on the very first line) — force a fresh, explicit fd to
+# /dev/console instead of trusting the inherited one. The kernel's own
+# devtmpfs auto-mount runs before PID 1 starts, so /dev/console already
+# exists at this point.
+exec > /dev/console 2>&1
+
 set -e
 
 echo "init.sh: starting"
