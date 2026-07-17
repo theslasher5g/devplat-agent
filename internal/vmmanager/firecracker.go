@@ -3,6 +3,7 @@ package vmmanager
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/creack/pty"
 	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
 	models "github.com/firecracker-microvm/firecracker-go-sdk/client/models"
 	"github.com/theslasher5g/devplat-agent/internal/config"
@@ -60,12 +62,32 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 	// serial console — despite what the KernelArgs comment used to imply,
 	// ttyS0 output was never actually captured anywhere: VMCommandBuilder
 	// doesn't wire stdout/stderr unless told to, so it was silently
-	// discarded. That's the only place init.sh's own output (or a guest
-	// kernel panic) would show up, so wire it to a real file.
+	// discarded.
+	//
+	// A plain os.File as Firecracker's stdout/stderr looked like it should
+	// work but didn't: the guest never produced a single byte of userspace
+	// output even though kernel messages came through fine, and a manual
+	// side-by-side test confirmed why — running Firecracker attached to a
+	// real terminal, the exact same kernel+rootfs booted and produced
+	// init.sh's output immediately. Something about the serial console
+	// path only works when Firecracker's stdout is an actual tty. A pty
+	// gives it one: the slave end goes to Firecracker as a real terminal,
+	// and a goroutine copies everything from the master end into the log
+	// file for after-the-fact debugging.
+	ptmx, ttyDev, err := pty.Open()
+	if err != nil {
+		return fmt.Errorf("open pty for console: %w", err)
+	}
 	consoleFile, err := os.OpenFile(consolePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
+		_ = ttyDev.Close()
+		_ = ptmx.Close()
 		return fmt.Errorf("open console log: %w", err)
 	}
+	go func() {
+		defer consoleFile.Close()
+		_, _ = io.Copy(consoleFile, ptmx)
+	}()
 
 	fcCfg := firecracker.Config{
 		SocketPath:      socketPath,
@@ -73,7 +95,7 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 		LogLevel:        "Warning",
 		KernelImagePath: b.cfg.KernelImagePath,
 		// console on ttyS0 — Firecracker writes that to its own process
-		// stdout/stderr (wired to consoleFile below), for boot-failure
+		// stdout/stderr (wired to the pty below), for boot-failure
 		// debugging; reboot=k makes a guest kernel panic kill the VM
 		// instead of looping, so the reaper doesn't have to distinguish
 		// "slow" from "stuck".
@@ -104,26 +126,31 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 	cmd := firecracker.VMCommandBuilder{}.
 		WithBin(b.cfg.FirecrackerBinary).
 		WithSocketPath(socketPath).
-		WithStdout(consoleFile).
-		WithStderr(consoleFile).
+		WithStdout(ttyDev).
+		WithStderr(ttyDev).
 		Build(ctx)
 
 	machine, err := firecracker.NewMachine(ctx, fcCfg, firecracker.WithProcessRunner(cmd))
 	if err != nil {
-		_ = consoleFile.Close()
+		_ = ttyDev.Close()
+		_ = ptmx.Close()
 		_ = teardownFirewall(b.cfg, nc)
 		_ = teardownTapDevice(nc)
 		return fmt.Errorf("configure machine: %w", err)
 	}
 	if err := machine.Start(ctx); err != nil {
-		_ = consoleFile.Close()
+		_ = ttyDev.Close()
+		_ = ptmx.Close()
 		_ = teardownFirewall(b.cfg, nc)
 		_ = teardownTapDevice(nc)
 		return fmt.Errorf("start machine: %w", err)
 	}
-	// From here the subprocess owns its own duplicated stdout/stderr fds —
-	// safe to close our handle without affecting what it writes.
-	_ = consoleFile.Close()
+	// From here the subprocess owns its own duplicated fd for the tty slave
+	// — safe to close our handle without affecting what it writes. Keep
+	// ptmx (the master) open: the copy goroutine reads from it until
+	// Firecracker exits and closes its end, at which point io.Copy hits
+	// EOF and the goroutine closes consoleFile itself.
+	_ = ttyDev.Close()
 
 	pid, err := machine.PID()
 	if err != nil {

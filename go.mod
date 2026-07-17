@@ -3,6 +3,7 @@ module github.com/theslasher5g/devplat-agent
 go 1.23
 
 require (
+	github.com/creack/pty v1.1.24
 	github.com/firecracker-microvm/firecracker-go-sdk v1.0.0
 	github.com/vishvananda/netlink v1.3.1
 )
