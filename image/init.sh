@@ -5,23 +5,28 @@
 # (StaticNetworkConfiguration) already bring up eth0 with a static IP before
 # userspace starts, via the kernel's IP autoconfiguration — nothing to do
 # here for networking.
+#
+# Two earlier attempts at redirecting to /dev/console (both before and
+# after this script's own devtmpfs mount) produced total silence — every
+# kernel printk shows up fine on this console, so ttyS0 itself works;
+# /dev/console apparently isn't reliably aliased to it in this guest.
+# Target /dev/ttyS0 directly instead: it's the exact device named in the
+# kernel command line (console=ttyS0) that's already proven to work,
+# and the kernel's own automatic devtmpfs mount (visible in dmesg before
+# userspace even starts) means /dev is already populated at this point —
+# no mount of our own needed first.
+exec > /dev/ttyS0 2>&1
+echo "init.sh: starting, /dev/ttyS0 redirect active"
+
 set -e
 
 mount -t proc proc /proc
+echo "init.sh: /proc mounted"
 mount -t sysfs sysfs /sys
+echo "init.sh: /sys mounted"
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 mkdir -p /dev/pts && mount -t devpts devpts /dev/pts 2>/dev/null || true
-
-# Whatever stdio the kernel handed PID 1 was silently swallowing every
-# echo here (nothing showed up on the Firecracker console log even with
-# a checkpoint on the very first line) — force a fresh, explicit fd to
-# /dev/console instead of trusting the inherited one. This has to come
-# AFTER the mounts above, not before: an earlier attempt put it first
-# and got the same silence, because /dev isn't guaranteed populated
-# (and /dev/console with it) until the devtmpfs mount above actually
-# runs — there's no guarantee the kernel auto-mounted it already.
-exec > /dev/console 2>&1
-echo "init.sh: starting, /dev/console redirect active"
+echo "init.sh: /dev ready"
 
 # The registry pull-through-cache lives on the host, reachable at this VM's
 # default gateway (the tap device's host-side IP — see devplat-agent's
