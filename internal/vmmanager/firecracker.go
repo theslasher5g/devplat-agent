@@ -129,6 +129,12 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 		WithStdout(ttyDev).
 		WithStderr(ttyDev).
 		Build(ctx)
+	// Handing the child an fd that happens to be a pty isn't enough on its
+	// own — without this, Firecracker never gets the pty as its controlling
+	// terminal (no session leader, no TIOCSCTTY), so the kernel's tty layer
+	// doesn't treat ttyS0 the way it does for a real login shell. Ctty:1
+	// indexes cmd's Stdout slot (the pty slave), matching WithStdout above.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 1}
 
 	machine, err := firecracker.NewMachine(ctx, fcCfg, firecracker.WithProcessRunner(cmd))
 	if err != nil {
@@ -172,6 +178,7 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 	// that link) until dockerd answers, so "assigned" actually means ready.
 	if err := waitForDockerReady(ctx, nc.GuestIP, 20*time.Second); err != nil {
 		_ = machine.StopVMM()
+		_ = ptmx.Close() // stopping the VMM closes the slave; we still own the master
 		_ = teardownFirewall(b.cfg, nc)
 		_ = teardownTapDevice(nc)
 		return fmt.Errorf("boot vm: %w", err)
