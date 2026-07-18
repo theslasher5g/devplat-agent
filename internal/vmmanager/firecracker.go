@@ -27,15 +27,26 @@ func ptrInt64(v int64) *int64    { return &v }
 // exist in a CI/dev sandbox. manager_test.go covers the slot/capacity logic
 // against a fake Backend instead; this file should be exercised by the
 // acceptance checklist on real hardware (Host A/B).
+// liveMachine pairs a running Machine with the cancel func for the context
+// its process is tied to. The SDK spawns a goroutine that force-stops the
+// VMM the instant that context is Done (see firecracker-go-sdk's Start:
+// "this goroutine is used to kill the process by context cancellation") —
+// so that context must live exactly as long as the VM does, never the
+// lifetime of whatever HTTP request happened to boot it.
+type liveMachine struct {
+	machine *firecracker.Machine
+	cancel  context.CancelFunc
+}
+
 type FirecrackerBackend struct {
 	cfg config.Config
 
 	mu       sync.Mutex
-	machines map[string]*firecracker.Machine // live handles; empty after an agent restart
+	machines map[string]liveMachine // live handles; empty after an agent restart
 }
 
 func NewFirecrackerBackend(cfg config.Config) *FirecrackerBackend {
-	return &FirecrackerBackend{cfg: cfg, machines: map[string]*firecracker.Machine{}}
+	return &FirecrackerBackend{cfg: cfg, machines: map[string]liveMachine{}}
 }
 
 func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, rootfsPath string) error {
@@ -132,12 +143,26 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 		VMID: vm.ID,
 	}
 
+	// NewMachine/Start get their OWN long-lived context, never the one this
+	// Boot() call was handed. The SDK ties the child process's entire life
+	// to whatever context it's started with — a goroutine inside Start()
+	// force-stops the VMM the instant that context is cancelled. The ctx
+	// passed into Boot() belongs to a single HTTP request (handleCreateVM's
+	// `defer cancel()`, ~a few seconds), while a VM is meant to live for its
+	// full TTL (up to an hour). Using the request's ctx here was killing
+	// every VM within instants of a successful boot — readiness would
+	// succeed, handleCreateVM would return and cancel its context, and the
+	// SDK's watcher goroutine would immediately SIGTERM the process, which
+	// looked exactly like an unexplained crash right after "assigned".
+	// machineCtx is cancelled explicitly in Stop(), not by any timeout.
+	machineCtx, machineCancel := context.WithCancel(context.Background())
+
 	cmd := firecracker.VMCommandBuilder{}.
 		WithBin(b.cfg.FirecrackerBinary).
 		WithSocketPath(socketPath).
 		WithStdout(ttyDev).
 		WithStderr(ttyDev).
-		Build(ctx)
+		Build(machineCtx)
 	// Handing the child an fd that happens to be a pty isn't enough on its
 	// own — without this, Firecracker never gets the pty as its controlling
 	// terminal (no session leader, no TIOCSCTTY), so the kernel's tty layer
@@ -145,15 +170,17 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 	// indexes cmd's Stdout slot (the pty slave), matching WithStdout above.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 1}
 
-	machine, err := firecracker.NewMachine(ctx, fcCfg, firecracker.WithProcessRunner(cmd))
+	machine, err := firecracker.NewMachine(machineCtx, fcCfg, firecracker.WithProcessRunner(cmd))
 	if err != nil {
+		machineCancel()
 		_ = ttyDev.Close()
 		_ = ptmx.Close()
 		_ = teardownFirewall(b.cfg, nc)
 		_ = teardownTapDevice(nc)
 		return fmt.Errorf("configure machine: %w", err)
 	}
-	if err := machine.Start(ctx); err != nil {
+	if err := machine.Start(machineCtx); err != nil {
+		machineCancel()
 		_ = ttyDev.Close()
 		_ = ptmx.Close()
 		_ = teardownFirewall(b.cfg, nc)
@@ -194,6 +221,7 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 	if err := waitForDockerReady(ctx, nc.GuestIP, 30*time.Second); err != nil {
 		fmt.Printf("[vmmanager] readiness wait FAILED for %s after %s: %v\n", vm.ID, time.Since(readyStart), err)
 		_ = machine.StopVMM()
+		machineCancel()
 		_ = ptmx.Close() // stopping the VMM closes the slave; we still own the master
 		_ = teardownFirewall(b.cfg, nc)
 		_ = teardownTapDevice(nc)
@@ -202,7 +230,7 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 	fmt.Printf("[vmmanager] readiness wait SUCCEEDED for %s after %s\n", vm.ID, time.Since(readyStart))
 
 	b.mu.Lock()
-	b.machines[vm.ID] = machine
+	b.machines[vm.ID] = liveMachine{machine: machine, cancel: machineCancel}
 	b.mu.Unlock()
 
 	vm.Pid = pid
@@ -240,9 +268,10 @@ func (b *FirecrackerBackend) Stop(ctx context.Context, vm *VM) error {
 	b.mu.Unlock()
 
 	if ok {
-		if err := machine.StopVMM(); err != nil {
+		if err := machine.machine.StopVMM(); err != nil {
 			return fmt.Errorf("stop vmm: %w", err)
 		}
+		machine.cancel()
 		b.mu.Lock()
 		delete(b.machines, vm.ID)
 		b.mu.Unlock()
