@@ -113,10 +113,8 @@ fi
 # exec'ing it directly would have.
 # This guest kernel (4.14) predates nf_tables, so iptables' default nft
 # backend fails ("Protocol not supported") and dockerd can't build its NAT
-# chains — it exits with "failed to create NAT chain DOCKER: iptables not
-# found". Repoint the iptables commands at the legacy (x_tables) backend,
-# which 4.14 does support. Done at boot so it survives image rebuilds and
-# needs no exact build-time paths.
+# chains. If a legacy (x_tables) iptables binary is available, repoint the
+# iptables commands at it — that backend 4.14 does support.
 for cmd in iptables iptables-save iptables-restore ip6tables ip6tables-save ip6tables-restore; do
   base="${cmd%%-*}"                 # iptables / ip6tables
   suffix="${cmd#"$base"}"           # "" / -save / -restore
@@ -125,14 +123,27 @@ for cmd in iptables iptables-save iptables-restore ip6tables ip6tables-save ip6t
   cp="$(command -v "$cmd" 2>/dev/null)" || continue
   ln -sf "$lp" "$cp"
 done
-echo "init.sh: iptables backend -> $(iptables --version 2>&1 | head -1)"
+
+# Decide whether dockerd can manage iptables at all. If neither nft (kernel
+# too old) nor a working legacy backend is available, start dockerd with
+# --iptables=false so the daemon still comes up — port publishing via NAT
+# won't work, but `docker version`, image pulls and containers that don't
+# need published ports do. If iptables works, leave dockerd to manage it
+# normally (full networking, needed for Testcontainers port mapping).
+if iptables -t nat -L >/dev/null 2>&1; then
+  echo "init.sh: iptables works -> $(iptables --version 2>&1 | head -1); dockerd will manage NAT"
+  IPTABLES_FLAGS="--userland-proxy=false"
+else
+  echo "init.sh: WARNING iptables non-functional on this kernel; starting dockerd with --iptables=false"
+  IPTABLES_FLAGS="--iptables=false --ip-forward=false --bridge=none"
+fi
 
 echo "init.sh: starting dockerd"
 dockerd \
   -H unix:///var/run/docker.sock \
   -H tcp://0.0.0.0:2375 \
   --containerd /run/containerd/containerd.sock \
-  --userland-proxy=false \
+  $IPTABLES_FLAGS \
   --log-level info > /var/log/dockerd.log 2>&1 &
 DOCKERD_PID=$!
 echo "init.sh: dockerd pid=$DOCKERD_PID"
