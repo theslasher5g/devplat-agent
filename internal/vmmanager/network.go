@@ -89,6 +89,13 @@ func runCmd(name string, args ...string) error {
 // is a mechanical change, not a design change.
 func setupFirewall(cfg config.Config, nc NetConfig) error {
 	port := strconv.Itoa(nc.DockerPort)
+	// The DNAT below only reaches the guest if the host actually forwards
+	// packets between the WireGuard interface and the tap device. Some hosts
+	// set this in sysctl.conf, but don't rely on it — a fresh host with
+	// forwarding off silently black-holes every tunnel connection.
+	if err := runCmd("sysctl", "-w", "net.ipv4.ip_forward=1"); err != nil {
+		return fmt.Errorf("enable ip_forward: %w", err)
+	}
 	steps := [][]string{
 		// Only the WireGuard subnet (i.e. the scheduler) may reach this
 		// VM's Docker API, DNAT'd from the host port to the guest.
@@ -97,6 +104,13 @@ func setupFirewall(cfg config.Config, nc NetConfig) error {
 		// Belt and suspenders: reject the same port from anywhere else, in
 		// case the host also has another interface routed to it.
 		{"-A", "INPUT", "-p", "tcp", "--dport", port, "!", "-s", cfg.WireguardCIDR, "-j", "DROP"},
+		// Explicitly allow the control plane (WireGuard subnet) to reach this
+		// VM. Required, not redundant: the host's FORWARD policy is DROP, so
+		// without an ACCEPT the DNAT'd NEW connection falls straight through
+		// to the drop and the tunnel times out. The rules below only DROP
+		// unwanted sources and ACCEPT replies — none of them accepts the
+		// wanted NEW connection itself, which is exactly what this does.
+		{"-A", "FORWARD", "-s", cfg.WireguardCIDR, "-o", nc.TapName, "-j", "ACCEPT"},
 		// No unsolicited inbound to the VM from outside the tunnel at all.
 		{"-A", "FORWARD", "-o", nc.TapName, "-m", "state", "--state", "NEW",
 			"!", "-s", cfg.WireguardCIDR, "-j", "DROP"},
@@ -123,6 +137,7 @@ func teardownFirewall(cfg config.Config, nc NetConfig) error {
 		{"-t", "nat", "-D", "PREROUTING", "-p", "tcp", "-s", cfg.WireguardCIDR,
 			"--dport", port, "-j", "DNAT", "--to-destination", nc.GuestIP.String() + ":2375"},
 		{"-D", "INPUT", "-p", "tcp", "--dport", port, "!", "-s", cfg.WireguardCIDR, "-j", "DROP"},
+		{"-D", "FORWARD", "-s", cfg.WireguardCIDR, "-o", nc.TapName, "-j", "ACCEPT"},
 		{"-D", "FORWARD", "-o", nc.TapName, "-m", "state", "--state", "NEW",
 			"!", "-s", cfg.WireguardCIDR, "-j", "DROP"},
 		{"-D", "FORWARD", "-o", nc.TapName, "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"},
