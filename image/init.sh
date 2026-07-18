@@ -28,15 +28,22 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 mkdir -p /dev/pts && mount -t devpts devpts /dev/pts 2>/dev/null || true
 echo "init.sh: /dev ready"
 
-# dockerd needs a real cgroup hierarchy to initialize its cgroup driver —
-# without this, /sys/fs/cgroup is just an empty directory under the plain
-# sysfs mount above, and dockerd was observed hanging silently past the
-# 20s readiness window (confirmed working fine via chroot on the host,
-# which inherits the host's own working cgroup mount — the guest never had
-# one at all).
+# dockerd needs a real cgroup hierarchy to initialize its cgroup driver.
+# cgroup2 alone (tried first) didn't fix the silent hang — this guest
+# kernel is Firecracker's stock 4.14.174, and the cgroup v2 *cpu*
+# controller wasn't merged until 4.15; mounting cgroup2 here gives dockerd
+# a filesystem but not the controller files a modern dockerd's cgroupfs
+# driver expects, which plausibly explains a hang rather than a clean
+# error. cgroup v1 (per-controller hierarchies) has been stable since
+# 2.6.24 and is what dockerd has defaulted to for most of its life — far
+# safer bet on a kernel this old.
 mkdir -p /sys/fs/cgroup
-mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null || true
-echo "init.sh: cgroup2 mounted at /sys/fs/cgroup"
+mount -t tmpfs -o mode=755 cgroup_root /sys/fs/cgroup
+for ctrl in cpu cpuacct memory blkio devices freezer pids net_cls net_prio perf_event; do
+  mkdir -p "/sys/fs/cgroup/$ctrl"
+  mount -t cgroup -o "$ctrl" cgroup "/sys/fs/cgroup/$ctrl" 2>/dev/null || rmdir "/sys/fs/cgroup/$ctrl" 2>/dev/null
+done
+echo "init.sh: cgroup v1 hierarchies mounted: $(ls /sys/fs/cgroup)"
 
 # The registry pull-through-cache lives on the host, reachable at this VM's
 # default gateway (the tap device's host-side IP — see devplat-agent's
