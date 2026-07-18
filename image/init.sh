@@ -28,6 +28,16 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 mkdir -p /dev/pts && mount -t devpts devpts /dev/pts 2>/dev/null || true
 echo "init.sh: /dev ready"
 
+# dockerd needs a real cgroup hierarchy to initialize its cgroup driver —
+# without this, /sys/fs/cgroup is just an empty directory under the plain
+# sysfs mount above, and dockerd was observed hanging silently past the
+# 20s readiness window (confirmed working fine via chroot on the host,
+# which inherits the host's own working cgroup mount — the guest never had
+# one at all).
+mkdir -p /sys/fs/cgroup
+mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null || true
+echo "init.sh: cgroup2 mounted at /sys/fs/cgroup"
+
 # The registry pull-through-cache lives on the host, reachable at this VM's
 # default gateway (the tap device's host-side IP — see devplat-agent's
 # network.go: it's assigned per VM slot, so it can't be baked in statically).
