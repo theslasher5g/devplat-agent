@@ -45,6 +45,19 @@ for ctrl in cpu cpuacct memory blkio devices freezer pids net_cls net_prio perf_
 done
 echo "init.sh: cgroup v1 hierarchies mounted: $(ls /sys/fs/cgroup)"
 
+# Seed the kernel entropy pool immediately. THIS is the fix for the bug that
+# had every boot look like a silent hang: this guest has no virtio-rng device
+# and none of the interrupt sources (disk, input, network noise) a real
+# machine uses to seed randomness, so the kernel CRNG took ~80s to initialize
+# from scratch. dockerd's Go runtime calls getrandom(), which BLOCKS until the
+# CRNG is ready — so dockerd printed nothing and never opened its port within
+# any reasonable readiness window. (The random.trust_cpu=on kernel arg would
+# also solve this, but only on Linux 4.19+; this guest kernel is 4.14, which
+# predates that option and silently ignores it.) haveged fills the pool from
+# CPU timing jitter within a second or two, kernel-version-independently.
+haveged -w 1024 2>/dev/null && echo "init.sh: haveged started" || echo "init.sh: WARNING haveged failed to start"
+echo "init.sh: entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo '?')"
+
 # The registry pull-through-cache lives on the host, reachable at this VM's
 # default gateway (the tap device's host-side IP — see devplat-agent's
 # network.go: it's assigned per VM slot, so it can't be baked in statically).

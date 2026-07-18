@@ -100,14 +100,14 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 		// instead of looping, so the reaper doesn't have to distinguish
 		// "slow" from "stuck".
 		//
-		// random.trust_cpu=on: this guest has no virtio-rng device and no
-		// physical entropy sources (disk timings, input devices, ...), so
-		// the kernel's entropy pool fills only from CPU jitter — Go's
-		// crypto/rand blocked dockerd for 60+ seconds waiting on it before
-		// printing a single byte of output, which is what looked like a
-		// dead hang in every earlier test. Trusting the CPU's hardware RNG
-		// (RDRAND) as a genuine entropy source is the standard fix for
-		// exactly this class of "slow boot in a minimal VM" problem.
+		// random.trust_cpu=on asks the kernel to seed its CRNG from the CPU's
+		// hardware RNG (RDRAND) so a headless guest with no entropy sources
+		// doesn't stall for ~80s initializing randomness — which blocked
+		// dockerd's getrandom() call and made every boot look like a hang.
+		// NOTE: this option only exists on Linux 4.19+; this guest's kernel
+		// is 4.14 and ignores it, so the ACTUAL fix is haveged running early
+		// in the guest's init.sh. This arg is kept only as belt-and-braces
+		// for the day the guest kernel is bumped past 4.19.
 		KernelArgs: "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on",
 		Drives: []models.Drive{{
 			DriveID:      ptrString("rootfs"),
