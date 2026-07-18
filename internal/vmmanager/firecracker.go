@@ -190,13 +190,16 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 	// on constrained single-vCPU hardware — 30s leaves comfortable margin
 	// now that the entropy-starvation issue (60s+ blocked in crypto/rand)
 	// is fixed via random.trust_cpu=on.
+	readyStart := time.Now()
 	if err := waitForDockerReady(ctx, nc.GuestIP, 30*time.Second); err != nil {
+		fmt.Printf("[vmmanager] readiness wait FAILED for %s after %s: %v\n", vm.ID, time.Since(readyStart), err)
 		_ = machine.StopVMM()
 		_ = ptmx.Close() // stopping the VMM closes the slave; we still own the master
 		_ = teardownFirewall(b.cfg, nc)
 		_ = teardownTapDevice(nc)
 		return fmt.Errorf("boot vm: %w", err)
 	}
+	fmt.Printf("[vmmanager] readiness wait SUCCEEDED for %s after %s\n", vm.ID, time.Since(readyStart))
 
 	b.mu.Lock()
 	b.machines[vm.ID] = machine

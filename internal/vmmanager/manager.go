@@ -228,6 +228,7 @@ func (m *Manager) releaseSlot(slot int) {
 }
 
 func (m *Manager) Destroy(ctx context.Context, id string) error {
+	fmt.Printf("[vmmanager] Destroy called for %s\n", id)
 	m.mu.Lock()
 	vm, ok := m.vms[id]
 	m.mu.Unlock()
