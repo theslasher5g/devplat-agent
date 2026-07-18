@@ -18,6 +18,12 @@
 exec > /dev/ttyS0 2>&1
 echo "init.sh: starting, /dev/ttyS0 redirect active"
 
+# The kernel starts PID 1 with a near-empty PATH, which is inherited by
+# everything we launch — including dockerd, which then can't find `runc`
+# or `iptables` (both installed, just not on PATH) and dies with
+# "executable file not found in $PATH". Set a real PATH up front.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
 set -e
 
 mount -t proc proc /proc
@@ -105,6 +111,22 @@ fi
 # the live console output and actually shows the failure. `wait` at the end
 # keeps this script (PID 1) alive exactly as long as dockerd runs, same as
 # exec'ing it directly would have.
+# This guest kernel (4.14) predates nf_tables, so iptables' default nft
+# backend fails ("Protocol not supported") and dockerd can't build its NAT
+# chains — it exits with "failed to create NAT chain DOCKER: iptables not
+# found". Repoint the iptables commands at the legacy (x_tables) backend,
+# which 4.14 does support. Done at boot so it survives image rebuilds and
+# needs no exact build-time paths.
+for cmd in iptables iptables-save iptables-restore ip6tables ip6tables-save ip6tables-restore; do
+  base="${cmd%%-*}"                 # iptables / ip6tables
+  suffix="${cmd#"$base"}"           # "" / -save / -restore
+  legacy="${base}-legacy${suffix}"  # iptables-legacy / iptables-legacy-save / ...
+  lp="$(command -v "$legacy" 2>/dev/null)" || continue
+  cp="$(command -v "$cmd" 2>/dev/null)" || continue
+  ln -sf "$lp" "$cp"
+done
+echo "init.sh: iptables backend -> $(iptables --version 2>&1 | head -1)"
+
 echo "init.sh: starting dockerd"
 dockerd \
   -H unix:///var/run/docker.sock \

@@ -83,7 +83,7 @@ echo "==> installing docker + containerd inside chroot"
 chroot "$MOUNT_DIR" /bin/sh -c '
   set -e
   apk update
-  apk add --no-cache docker docker-cli containerd iproute2 ca-certificates haveged
+  apk add --no-cache docker docker-cli containerd runc iptables iproute2 ca-certificates haveged
 '
 
 echo "==> installing init.sh as PID 1"
