@@ -87,9 +87,15 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Needs real headroom over the boot-readiness wait inside Boot()
-	// (waitForDockerReady alone budgets up to 30s) plus tap/firewall setup
-	// and the Firecracker start itself.
-	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	// (waitForDockerReady alone budgets up to 30s) plus tap/firewall setup,
+	// the rootfs copy, and the Firecracker start itself — VMs were observed
+	// dying ~18s into the readiness wait instead of at its own 30s deadline,
+	// which only makes sense if this outer context's deadline (previously
+	// 45s) was being hit first because the earlier setup steps ate more of
+	// the budget than expected. Generous margin here costs nothing on the
+	// happy path; it just avoids this handler's own timeout preempting the
+	// readiness wait's own, more informative, timeout/diagnostic dump.
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
 
 	vm, err := s.manager.Create(ctx, req.TeamID, req.TTLMinutes, req.Vcpu, req.RamMb)
