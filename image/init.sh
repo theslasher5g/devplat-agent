@@ -76,9 +76,34 @@ fi
 # follow-up, not required for this build step); only reachable at all
 # because the host's iptables DNAT + WireGuard-only binding restrict who
 # can reach this port in the first place (see devplat-agent/internal/vmmanager/network.go).
-echo "init.sh: exec'ing dockerd"
-exec dockerd \
+#
+# Backgrounded with its own log file rather than exec'd directly onto the
+# console: dockerd was observed producing zero bytes of output on the live
+# ttyS0 console every time it was exec'd here, despite the identical binary
+# logging immediately when run via chroot on the host — capturing to a file
+# and dumping it on a failed readiness check sidesteps whatever is eating
+# the live console output and actually shows the failure. `wait` at the end
+# keeps this script (PID 1) alive exactly as long as dockerd runs, same as
+# exec'ing it directly would have.
+echo "init.sh: starting dockerd"
+dockerd \
   -H unix:///var/run/docker.sock \
   -H tcp://0.0.0.0:2375 \
   --containerd /run/containerd/containerd.sock \
-  --log-level info
+  --log-level info > /var/log/dockerd.log 2>&1 &
+DOCKERD_PID=$!
+echo "init.sh: dockerd pid=$DOCKERD_PID"
+
+for i in $(seq 1 100); do
+  nc -z 127.0.0.1 2375 2>/dev/null && break
+  kill -0 "$DOCKERD_PID" 2>/dev/null || break
+  sleep 0.2
+done
+if nc -z 127.0.0.1 2375 2>/dev/null; then
+  echo "init.sh: dockerd is listening on 2375"
+else
+  echo "init.sh: dockerd not listening after ~20s (or it exited), dumping its log:"
+  cat /var/log/dockerd.log 2>&1 || echo "init.sh: (no dockerd log found)"
+fi
+
+wait "$DOCKERD_PID"
