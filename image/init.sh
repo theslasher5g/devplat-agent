@@ -51,6 +51,16 @@ for ctrl in cpu cpuacct memory blkio devices freezer pids net_cls net_prio perf_
 done
 echo "init.sh: cgroup v1 hierarchies mounted: $(ls /sys/fs/cgroup)"
 
+# /etc/resolv.conf baked into the golden image is a leftover from the BUILD
+# host (build-golden-image.sh copies its /etc/resolv.conf into the chroot so
+# `apk` can resolve packages) — it points at 127.0.0.53, the build host's own
+# systemd-resolved stub. This guest doesn't run systemd-resolved at all, so
+# dockerd's own image pulls failed DNS resolution with "connection refused"
+# against a resolver that was never actually reachable from in here. Force
+# a real, always-reachable resolver regardless of what got baked in.
+echo 'nameserver 1.1.1.1' > /etc/resolv.conf
+echo "init.sh: /etc/resolv.conf -> $(cat /etc/resolv.conf)"
+
 # Seed the kernel entropy pool immediately. THIS is the fix for the bug that
 # had every boot look like a silent hang: this guest has no virtio-rng device
 # and none of the interrupt sources (disk, input, network noise) a real
