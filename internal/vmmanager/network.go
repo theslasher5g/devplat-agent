@@ -101,6 +101,16 @@ func setupFirewall(cfg config.Config, nc NetConfig) error {
 		// VM's Docker API, DNAT'd from the host port to the guest.
 		{"-t", "nat", "-A", "PREROUTING", "-p", "tcp", "-s", cfg.WireguardCIDR,
 			"--dport", port, "-j", "DNAT", "--to-destination", nc.GuestIP.String() + ":2375"},
+		// Without this, outbound guest traffic (registry pulls, anything a
+		// test container needs) leaves the host with the guest's private
+		// tap-subnet source address, which nothing on the public internet
+		// can route a reply back to — FORWARD allowing the packet out is
+		// necessary but not sufficient. Rewrite the source to the host's
+		// own outbound address so replies come back at all. (Confirmed:
+		// `docker run hello-world` inside the guest failed with "context
+		// deadline exceeded" — the request left but no response could ever
+		// return without this.)
+		{"-t", "nat", "-A", "POSTROUTING", "-s", nc.GuestIP.String() + "/32", "!", "-o", nc.TapName, "-j", "MASQUERADE"},
 		// Belt and suspenders: reject the same port from anywhere else, in
 		// case the host also has another interface routed to it.
 		{"-A", "INPUT", "-p", "tcp", "--dport", port, "!", "-s", cfg.WireguardCIDR, "-j", "DROP"},
@@ -136,6 +146,7 @@ func teardownFirewall(cfg config.Config, nc NetConfig) error {
 	steps := [][]string{
 		{"-t", "nat", "-D", "PREROUTING", "-p", "tcp", "-s", cfg.WireguardCIDR,
 			"--dport", port, "-j", "DNAT", "--to-destination", nc.GuestIP.String() + ":2375"},
+		{"-t", "nat", "-D", "POSTROUTING", "-s", nc.GuestIP.String() + "/32", "!", "-o", nc.TapName, "-j", "MASQUERADE"},
 		{"-D", "INPUT", "-p", "tcp", "--dport", port, "!", "-s", cfg.WireguardCIDR, "-j", "DROP"},
 		{"-D", "FORWARD", "-s", cfg.WireguardCIDR, "-o", nc.TapName, "-j", "ACCEPT"},
 		{"-D", "FORWARD", "-o", nc.TapName, "-m", "state", "--state", "NEW",
