@@ -176,7 +176,7 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 	// the VM comes up fine a couple seconds later. Dial the guest directly
 	// on the tap network (no DNAT/WireGuard hop needed, this host owns
 	// that link) until dockerd answers, so "assigned" actually means ready.
-	if err := waitForDockerReady(ctx, nc.GuestIP, 20*time.Second); err != nil {
+	if err := waitForDockerReady(ctx, nc.GuestIP, 45*time.Second); err != nil {
 		_ = machine.StopVMM()
 		_ = ptmx.Close() // stopping the VMM closes the slave; we still own the master
 		_ = teardownFirewall(b.cfg, nc)
