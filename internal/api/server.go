@@ -87,10 +87,9 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Needs real headroom over the boot-readiness wait inside Boot()
-	// (waitForDockerReady alone budgets up to 100s, temporarily, while
-	// diagnosing a suspected slow dockerd startup in the guest) plus
-	// tap/firewall setup and the Firecracker start itself.
-	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	// (waitForDockerReady alone budgets up to 30s) plus tap/firewall setup
+	// and the Firecracker start itself.
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
 
 	vm, err := s.manager.Create(ctx, req.TeamID, req.TTLMinutes, req.Vcpu, req.RamMb)

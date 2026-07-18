@@ -99,7 +99,16 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 		// debugging; reboot=k makes a guest kernel panic kill the VM
 		// instead of looping, so the reaper doesn't have to distinguish
 		// "slow" from "stuck".
-		KernelArgs: "console=ttyS0 reboot=k panic=1 pci=off",
+		//
+		// random.trust_cpu=on: this guest has no virtio-rng device and no
+		// physical entropy sources (disk timings, input devices, ...), so
+		// the kernel's entropy pool fills only from CPU jitter — Go's
+		// crypto/rand blocked dockerd for 60+ seconds waiting on it before
+		// printing a single byte of output, which is what looked like a
+		// dead hang in every earlier test. Trusting the CPU's hardware RNG
+		// (RDRAND) as a genuine entropy source is the standard fix for
+		// exactly this class of "slow boot in a minimal VM" problem.
+		KernelArgs: "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on",
 		Drives: []models.Drive{{
 			DriveID:      ptrString("rootfs"),
 			PathOnHost:   ptrString(rootfsPath),
@@ -176,12 +185,12 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 	// the VM comes up fine a couple seconds later. Dial the guest directly
 	// on the tap network (no DNAT/WireGuard hop needed, this host owns
 	// that link) until dockerd answers, so "assigned" actually means ready.
-	// Temporarily generous while diagnosing whether the guest just needs
-	// more time to clear dockerd's own ~15s intentional startup stall (the
-	// insecure-TCP-without-TLS deprecation slowdown) plus containerd init —
-	// confirmed via chroot that dockerd goes dead silent for exactly that
-	// stretch before either succeeding or failing outright.
-	if err := waitForDockerReady(ctx, nc.GuestIP, 100*time.Second); err != nil {
+	// dockerd's own ~15s intentional stall for the insecure-TCP-without-TLS
+	// deprecation warning, plus containerd startup, plus real boot variance
+	// on constrained single-vCPU hardware — 30s leaves comfortable margin
+	// now that the entropy-starvation issue (60s+ blocked in crypto/rand)
+	// is fixed via random.trust_cpu=on.
+	if err := waitForDockerReady(ctx, nc.GuestIP, 30*time.Second); err != nil {
 		_ = machine.StopVMM()
 		_ = ptmx.Close() // stopping the VMM closes the slave; we still own the master
 		_ = teardownFirewall(b.cfg, nc)
