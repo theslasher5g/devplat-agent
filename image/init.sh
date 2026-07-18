@@ -106,7 +106,7 @@ echo "init.sh: dockerd pid=$DOCKERD_PID"
 # just hung forever instead of returning quickly, masking whatever dockerd
 # itself was doing. Read /proc/net/tcp directly instead: no extra binary,
 # no flag-compatibility guesswork. 2375 decimal = 0947 hex; state 0A = LISTEN.
-for i in $(seq 1 125); do
+for i in $(seq 1 500); do
   grep -q ' 00000000:0947 .* 0A ' /proc/net/tcp 2>/dev/null && break
   kill -0 "$DOCKERD_PID" 2>/dev/null || break
   sleep 0.2
@@ -114,7 +114,7 @@ done
 if grep -q ' 00000000:0947 .* 0A ' /proc/net/tcp 2>/dev/null; then
   echo "init.sh: dockerd is listening on 2375"
 else
-  echo "init.sh: dockerd not listening after ~25s (or it exited), dumping its log:"
+  echo "init.sh: dockerd not listening after ~100s (or it exited), dumping its log:"
   cat /var/log/dockerd.log 2>&1 || echo "init.sh: (no dockerd log found)"
 fi
 
