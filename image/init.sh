@@ -115,12 +115,11 @@ dockerd \
 DOCKERD_PID=$!
 echo "init.sh: dockerd pid=$DOCKERD_PID"
 
-# A prior version of this check used `nc -z` to poll for the port —
-# this busybox build's nc doesn't behave like GNU nc's -z scan mode and
-# just hung forever instead of returning quickly, masking whatever dockerd
-# itself was doing. Read /proc/net/tcp directly instead: no extra binary,
-# no flag-compatibility guesswork. 2375 decimal = 0947 hex; state 0A = LISTEN.
-for i in $(seq 1 150); do
+# Read /proc/net/tcp directly to detect the listen socket (busybox nc's -z
+# doesn't behave like GNU nc's). 2375 decimal = 0947 hex; state 0A = LISTEN.
+# Loop caps at ~20s so that on failure this diagnostic dump runs BEFORE the
+# agent's own 30s readiness timeout kills the VM out from under us.
+for i in $(seq 1 100); do
   grep -q ' 00000000:0947 .* 0A ' /proc/net/tcp 2>/dev/null && break
   kill -0 "$DOCKERD_PID" 2>/dev/null || break
   sleep 0.2
@@ -128,8 +127,23 @@ done
 if grep -q ' 00000000:0947 .* 0A ' /proc/net/tcp 2>/dev/null; then
   echo "init.sh: dockerd is listening on 2375"
 else
-  echo "init.sh: dockerd not listening after ~30s (or it exited), dumping its log:"
-  cat /var/log/dockerd.log 2>&1 || echo "init.sh: (no dockerd log found)"
+  echo "init.sh: dockerd NOT listening after ~20s (or it exited)"
 fi
+# Always dump the daemon log + full network state, whether or not the socket
+# came up: the agent reaches this guest by dialing eth0's IP directly over the
+# tap link, so if dockerd's own iptables/bridge/ip_forward setup disturbs eth0
+# (a plausible cause of the host seeing i/o timeout even while dockerd is
+# listening inside), it'll show here.
+echo "=== init.sh: dockerd.log ==="
+cat /var/log/dockerd.log 2>&1 || echo "(no dockerd log)"
+echo "=== init.sh: ip addr ==="
+ip addr 2>&1
+echo "=== init.sh: ip route ==="
+ip route 2>&1
+echo "=== init.sh: iptables-save ==="
+iptables-save 2>&1 || echo "(iptables-save unavailable)"
+echo "=== init.sh: listening sockets (/proc/net/tcp) ==="
+cat /proc/net/tcp 2>&1
+echo "=== init.sh: end diagnostics ==="
 
 wait "$DOCKERD_PID"
