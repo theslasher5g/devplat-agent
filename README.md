@@ -128,13 +128,86 @@ cgroups) is **not exercised by any test in this repo** — it needs
 CI/dev sandbox. It must be verified against the acceptance checklist on
 real hardware (Host A/B).
 
+## Connect latency: the ~15s dockerd stall
+
+`devplat connect` used to take 15-17s end to end. Per-phase timing (see
+`manager.go`/`firecracker.go`'s `[vmmanager] ... in <duration>` log lines,
+and `init.sh`'s `[t=...]` markers, which read `/proc/uptime` since the guest
+has no synced wall clock) showed Firecracker itself launching in ~20ms and
+the whole guest boot (kernel, cgroup/entropy setup, containerd) landing well
+under 2s. The entire bottleneck was inside `dockerd` itself, confirmed
+directly in `/var/log/dockerd.log` inside the guest:
+
+```
+level=warning msg="Binding to an IP address without --tlsverify is deprecated.
+Startup is intentionally being slowed down to show this message"
+...
+(≈15s gap)
+...
+level=info msg="Loading containers: start."
+```
+
+dockerd deliberately sleeps ~15s when it binds a TCP socket with no
+`--tls`/`--tlsverify` flag at all, on the theory that the exposure might be
+accidental. Passing `--tls=false` states the intent explicitly and skips
+the sleep entirely — this is the fix in `init.sh`'s dockerd invocation.
+Real numbers after the fix, three consecutive VMs on the same host:
+**2.67s, 2.84s, 2.64s** readiness-wait time.
+
+This fix is baked into `init.sh`, so it's automatically part of any golden
+image built after this change. Existing hosts built before it need the
+patch applied to their already-built image — see the next section.
+
+## Patching an existing golden image without a full rebuild
+
+`build-golden-image.sh` downloads Alpine and reinstalls every package from
+scratch — massive overkill for a one-file change like the `--tls=false`
+fix above. `init.sh` is just `/sbin/init` inside the image's ext4
+filesystem, so patch it directly via a loop mount instead:
+
+```bash
+# 1. Find the image this host's agent actually loads — read it from the
+#    .env, don't assume it matches the `current` symlink (see gotcha below).
+grep GOLDEN_IMAGE_PATH /opt/devplat/agent/.env
+REAL_IMAGE=/opt/devplat/agent/images/<version>/rootfs.ext4   # from above
+
+# 2. Mount it read-write, drop in the updated init.sh, unmount cleanly.
+sudo mkdir -p /tmp/golden-patch
+sudo mount -o loop,rw "$REAL_IMAGE" /tmp/golden-patch
+sudo install -m 0755 image/init.sh /tmp/golden-patch/sbin/init
+sudo umount /tmp/golden-patch
+
+# 3. Verify the patch actually landed before trusting it.
+sudo mount -o loop,ro "$REAL_IMAGE" /tmp/golden-patch
+grep -- "--tls=false" /tmp/golden-patch/sbin/init
+sudo umount /tmp/golden-patch
+
+sudo systemctl restart devplat-agent
+```
+
+**Gotcha, hit live while rolling this out**: `GOLDEN_IMAGE_PATH` in a
+host's `.env` can point at a specific versioned path
+(`images/v1/rootfs.ext4`) that *doesn't* match what `images/current` is
+symlinked to (`images/v2/rootfs.ext4`, say) — the two can silently drift
+apart if a version was ever built without also repointing `.env`. Patching
+whichever one `current` resolves to, without checking `.env` first, patches
+a file the agent isn't even loading. Always resolve the real path from
+`.env` directly. If a host has accumulated multiple version directories
+with an unclear relationship between them, compare `images/<v>/MANIFEST`
+(`built_at`) and `diff` their `sbin/init` before trusting either — don't
+assume the one `current` points at, or the newest `built_at`, is
+automatically the good one. (This is also how a bad image switch got
+caught here: switching a host to a supposedly-"newer" image broke VM boot
+entirely — `GOLDEN_IMAGE_PATH` was rolled back to the known-good version
+while the broken one is set aside, unexamined, for later.)
+
 ## Known gaps / follow-ups
 
-- **Golden image build was not run end-to-end here.** The build environment
-  this repo was authored in blocks outbound access to Alpine's CDN (a
-  sandbox network policy, not a real-world constraint) — `build-golden-image.sh`
-  is syntax-checked (`bash -n`) but unexecuted. Verify `ALPINE_VERSION`
-  against https://alpinelinux.org/downloads/ before first real use.
+- **`cgroup setup failed ... permission denied`** on every VM boot (see
+  `createCgroup`/`addProcessToCgroup` in `firecracker.go`) — logged as a
+  warning and non-fatal (the VM runs fine without the cgroup CPU/RAM cap
+  being applied), but not yet root-caused. Cosmetic for now, worth cleaning
+  up before relying on per-VM resource caps actually being enforced.
 - **No egress allowlist/blocklist** (e.g. against known mining pools) — only
   a bandwidth cap and inbound denial, matching the explicit "first cut"
   scope in the work order.
