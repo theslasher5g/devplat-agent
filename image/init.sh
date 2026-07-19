@@ -16,6 +16,12 @@
 # userspace even starts) means /dev is already populated at this point —
 # no mount of our own needed first.
 exec > /dev/ttyS0 2>&1
+# t=<seconds since boot, not wall clock — this guest has no RTC/NTP fix at
+# this point> prefixes below let us see exactly which phase (cgroup/entropy
+# setup, containerd, or dockerd itself) actually eats the several seconds
+# between Firecracker launching and the agent's readiness dial succeeding,
+# instead of guessing from the outside.
+T() { cut -d' ' -f1 /proc/uptime 2>/dev/null || echo '?'; } # '?' before /proc is mounted below
 echo "init.sh: starting, /dev/ttyS0 redirect active"
 
 # The kernel starts PID 1 with a near-empty PATH, which is inherited by
@@ -27,12 +33,12 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 set -e
 
 mount -t proc proc /proc
-echo "init.sh: /proc mounted"
+echo "init.sh: /proc mounted [t=$(T)]"
 mount -t sysfs sysfs /sys
-echo "init.sh: /sys mounted"
+echo "init.sh: /sys mounted [t=$(T)]"
 mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
 mkdir -p /dev/pts && mount -t devpts devpts /dev/pts 2>/dev/null || true
-echo "init.sh: /dev ready"
+echo "init.sh: /dev ready [t=$(T)]"
 
 # dockerd needs a real cgroup hierarchy to initialize its cgroup driver.
 # cgroup2 alone (tried first) didn't fix the silent hang — this guest
@@ -49,7 +55,7 @@ for ctrl in cpu cpuacct memory blkio devices freezer pids net_cls net_prio perf_
   mkdir -p "/sys/fs/cgroup/$ctrl"
   mount -t cgroup -o "$ctrl" cgroup "/sys/fs/cgroup/$ctrl" 2>/dev/null || rmdir "/sys/fs/cgroup/$ctrl" 2>/dev/null
 done
-echo "init.sh: cgroup v1 hierarchies mounted: $(ls /sys/fs/cgroup)"
+echo "init.sh: cgroup v1 hierarchies mounted: $(ls /sys/fs/cgroup) [t=$(T)]"
 
 # /etc/resolv.conf baked into the golden image is a leftover from the BUILD
 # host (build-golden-image.sh copies its /etc/resolv.conf into the chroot so
@@ -71,8 +77,8 @@ echo "init.sh: /etc/resolv.conf -> $(cat /etc/resolv.conf)"
 # also solve this, but only on Linux 4.19+; this guest kernel is 4.14, which
 # predates that option and silently ignores it.) haveged fills the pool from
 # CPU timing jitter within a second or two, kernel-version-independently.
-haveged -w 1024 2>/dev/null && echo "init.sh: haveged started" || echo "init.sh: WARNING haveged failed to start"
-echo "init.sh: entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo '?')"
+haveged -w 1024 2>/dev/null && echo "init.sh: haveged started [t=$(T)]" || echo "init.sh: WARNING haveged failed to start [t=$(T)]"
+echo "init.sh: entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo '?') [t=$(T)]"
 
 # The registry pull-through-cache lives on the host, reachable at this VM's
 # default gateway (the tap device's host-side IP — see devplat-agent's
@@ -92,9 +98,9 @@ else
 fi
 
 mkdir -p /run/containerd
-echo "init.sh: starting containerd"
+echo "init.sh: starting containerd [t=$(T)]"
 containerd > /var/log/containerd.log 2>&1 &
-echo "init.sh: containerd pid=$!"
+echo "init.sh: containerd pid=$! [t=$(T)]"
 
 # Wait for containerd's socket before handing off to dockerd.
 for i in $(seq 1 50); do
@@ -102,9 +108,9 @@ for i in $(seq 1 50); do
   sleep 0.1
 done
 if [ -S /run/containerd/containerd.sock ]; then
-  echo "init.sh: containerd socket is up"
+  echo "init.sh: containerd socket is up [t=$(T)]"
 else
-  echo "init.sh: containerd socket NEVER appeared, dumping its log:"
+  echo "init.sh: containerd socket NEVER appeared after ~5s [t=$(T)], dumping its log:"
   cat /var/log/containerd.log 2>&1 || echo "init.sh: (no containerd log found)"
 fi
 
@@ -148,7 +154,7 @@ else
   IPTABLES_FLAGS="--iptables=false --ip-forward=false --bridge=none"
 fi
 
-echo "init.sh: starting dockerd"
+echo "init.sh: starting dockerd [t=$(T)]"
 dockerd \
   -H unix:///var/run/docker.sock \
   -H tcp://0.0.0.0:2375 \
@@ -156,7 +162,7 @@ dockerd \
   $IPTABLES_FLAGS \
   --log-level info > /var/log/dockerd.log 2>&1 &
 DOCKERD_PID=$!
-echo "init.sh: dockerd pid=$DOCKERD_PID"
+echo "init.sh: dockerd pid=$DOCKERD_PID [t=$(T)]"
 
 # Read /proc/net/tcp directly to detect the listen socket (busybox nc's -z
 # doesn't behave like GNU nc's). 2375 decimal = 0947 hex; state 0A = LISTEN.
@@ -168,9 +174,9 @@ for i in $(seq 1 100); do
   sleep 0.2
 done
 if grep -q ' 00000000:0947 .* 0A ' /proc/net/tcp 2>/dev/null; then
-  echo "init.sh: dockerd is listening on 2375"
+  echo "init.sh: dockerd is listening on 2375 [t=$(T)]"
 else
-  echo "init.sh: dockerd NOT listening after ~20s (or it exited)"
+  echo "init.sh: dockerd NOT listening after ~20s (or it exited) [t=$(T)]"
 fi
 # Always dump the daemon log + full network state, whether or not the socket
 # came up: the agent reaches this guest by dialing eth0's IP directly over the

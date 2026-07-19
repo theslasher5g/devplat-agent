@@ -197,16 +197,20 @@ func (m *Manager) Create(ctx context.Context, teamID string, ttlMinutes int, vcp
 	nc := deriveNetConfig(m.cfg, slot)
 	rootfsPath := filepath.Join(m.cfg.VMStateDir, vm.ID, "rootfs.ext4")
 
+	rootfsStart := time.Now()
 	if err := prepareRootfs(m.cfg.GoldenImagePath, rootfsPath); err != nil {
 		m.releaseSlot(slot)
 		return nil, fmt.Errorf("prepare rootfs: %w", err)
 	}
+	fmt.Printf("[vmmanager] %s: rootfs prepared in %s\n", vm.ID, time.Since(rootfsStart))
 
+	bootStart := time.Now()
 	if err := m.backend.Boot(ctx, vm, nc, rootfsPath); err != nil {
 		m.releaseSlot(slot)
 		_ = removeVMDir(filepath.Join(m.cfg.VMStateDir, vm.ID))
 		return nil, fmt.Errorf("boot vm: %w", err)
 	}
+	fmt.Printf("[vmmanager] %s: Boot() total %s\n", vm.ID, time.Since(bootStart))
 
 	if err := m.persist(vm); err != nil {
 		// The VM is running; losing its metadata would leak the slot on

@@ -50,6 +50,7 @@ func NewFirecrackerBackend(cfg config.Config) *FirecrackerBackend {
 }
 
 func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, rootfsPath string) error {
+	netSetupStart := time.Now()
 	if err := setupTapDevice(nc); err != nil {
 		return fmt.Errorf("tap setup: %w", err)
 	}
@@ -62,6 +63,7 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 		_ = teardownTapDevice(nc)
 		return fmt.Errorf("bandwidth cap: %w", err)
 	}
+	fmt.Printf("[vmmanager] %s: tap+firewall+bandwidth setup in %s\n", vm.ID, time.Since(netSetupStart))
 
 	socketPath := filepath.Join(b.cfg.VMStateDir, vm.ID, "firecracker.sock")
 	logPath := filepath.Join(b.cfg.VMStateDir, vm.ID, "firecracker.log")
@@ -170,6 +172,7 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 	// indexes cmd's Stdout slot (the pty slave), matching WithStdout above.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 1}
 
+	machineStart := time.Now()
 	machine, err := firecracker.NewMachine(machineCtx, fcCfg, firecracker.WithProcessRunner(cmd))
 	if err != nil {
 		machineCancel()
@@ -187,6 +190,7 @@ func (b *FirecrackerBackend) Boot(ctx context.Context, vm *VM, nc NetConfig, roo
 		_ = teardownTapDevice(nc)
 		return fmt.Errorf("start machine: %w", err)
 	}
+	fmt.Printf("[vmmanager] %s: NewMachine+Start (Firecracker process launch) in %s\n", vm.ID, time.Since(machineStart))
 	// From here the subprocess owns its own duplicated fd for the tty slave
 	// — safe to close our handle without affecting what it writes. Keep
 	// ptmx (the master) open: the copy goroutine reads from it until
