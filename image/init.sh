@@ -155,9 +155,20 @@ else
 fi
 
 echo "init.sh: starting dockerd [t=$(T)]"
+# --tls=false is not about disabling security here (TLS was never on; this
+# port is only reachable through the host's DNAT + WireGuard tunnel — see
+# network.go) — it's what stops dockerd's own ~15s self-imposed startup
+# delay. Binding -H tcp://... without ANY explicit --tls/--tlsverify flag
+# makes dockerd assume the exposure might be accidental and deliberately
+# sleep ~15s so the operator notices its "insecure API" warning
+# (confirmed directly in dockerd.log: "Startup is intentionally being
+# slowed down to show this message"). Passing --tls=false states the
+# exposure is intentional, which skips that sleep entirely — this was the
+# entire connect-latency bottleneck, not VM boot or containerd.
 dockerd \
   -H unix:///var/run/docker.sock \
   -H tcp://0.0.0.0:2375 \
+  --tls=false \
   --containerd /run/containerd/containerd.sock \
   $IPTABLES_FLAGS \
   --log-level info > /var/log/dockerd.log 2>&1 &
