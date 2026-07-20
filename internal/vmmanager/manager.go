@@ -10,8 +10,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -271,6 +273,25 @@ func (m *Manager) Get(id string) (*VM, bool) {
 	defer m.mu.Unlock()
 	vm, ok := m.vms[id]
 	return vm, ok
+}
+
+// GuestAddr returns "<guest IP>:<port>" for one VM — the address of an
+// arbitrary port inside the guest as reachable from THIS host over the VM's
+// tap link (the same path waitForDockerReady uses for :2375). The guest IP
+// is a pure function of the VM's slot, so this works even for VMs restored
+// by reconcile() after an agent restart. Used by the API's per-port proxy
+// (api/server.go) to reach container ports Docker published inside the
+// guest — those are only DNAT'd guest-side, so unlike the Docker API port
+// there is no host-side DNAT for them.
+func (m *Manager) GuestAddr(id string, port int) (string, error) {
+	m.mu.Lock()
+	vm, ok := m.vms[id]
+	m.mu.Unlock()
+	if !ok {
+		return "", ErrNotFound
+	}
+	nc := deriveNetConfig(m.cfg, vm.Slot)
+	return net.JoinHostPort(nc.GuestIP.String(), strconv.Itoa(port)), nil
 }
 
 type HealthStatus struct {

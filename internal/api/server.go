@@ -7,8 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -30,6 +33,7 @@ func NewServer(manager *vmmanager.Manager, token string) *Server {
 	s.mux.HandleFunc("POST /vms", s.handleCreateVM)
 	s.mux.HandleFunc("DELETE /vms/{id}", s.handleDeleteVM)
 	s.mux.HandleFunc("GET /vms", s.handleListVMs)
+	s.mux.HandleFunc("GET /vms/{id}/proxy/{port}", s.handleProxyPort)
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	return s
 }
@@ -144,6 +148,87 @@ func (s *Server) handleListVMs(w http.ResponseWriter, _ *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"vms": out})
+}
+
+// handleProxyPort upgrades this HTTP connection into a raw bidirectional
+// TCP pipe to an arbitrary port on one VM's guest IP, dialed over the tap
+// link this host owns. It exists for Testcontainers port mapping: ports
+// Docker publishes inside the guest are only DNAT'd guest-side (dockerd's
+// own NAT chains), so unlike the fixed Docker API port there is no
+// host-side DNAT a remote caller could hit — the backend's per-port tunnel
+// (devplat-backend/src/routes/tunnel.ts) calls this instead, one upgraded
+// connection per client TCP connection.
+//
+// Security model: same Bearer token as every other endpoint (enforced in
+// ServeHTTP before routing), reachable only on the WireGuard-bound listen
+// address, and the dial target is derived strictly from the VM's own slot —
+// a caller can pick the port but never the IP, so one team's tunnel can't
+// be steered at another VM (the backend enforces which team may name this
+// VM at all, exactly like the existing docker_endpoint tunnel).
+//
+// Deliberately NOT draining-gated: draining refuses new VMs but leaves
+// existing ones running, and their tunnels must keep working.
+func (s *Server) handleProxyPort(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	port, err := strconv.Atoi(r.PathValue("port"))
+	if err != nil || port < 1 || port > 65535 {
+		writeError(w, http.StatusBadRequest, "invalid_port")
+		return
+	}
+	addr, err := s.manager.GuestAddr(id, port)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	// Dial the guest BEFORE hijacking, so a dead/refusing port is still a
+	// clean HTTP error the backend can log and surface, not a mid-stream cut.
+	guest, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	if err != nil {
+		log.Printf("[api] proxy dial %s for vm %s failed: %v", addr, id, err)
+		writeError(w, http.StatusBadGateway, "guest_dial_failed")
+		return
+	}
+
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		_ = guest.Close()
+		writeError(w, http.StatusInternalServerError, "hijack_unsupported")
+		return
+	}
+	conn, bufrw, err := hj.Hijack()
+	if err != nil {
+		_ = guest.Close()
+		log.Printf("[api] proxy hijack for vm %s failed: %v", id, err)
+		return
+	}
+	defer conn.Close()
+	defer guest.Close()
+	// The server may have armed read/write deadlines on this conn before we
+	// took it over; a long-lived pipe (a test run holding a DB connection
+	// open for minutes) must not be killed by them.
+	_ = conn.SetDeadline(time.Time{})
+
+	if _, err := bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: tcp\r\nConnection: Upgrade\r\n\r\n"); err != nil {
+		return
+	}
+	if err := bufrw.Flush(); err != nil {
+		return
+	}
+
+	// bufrw.Reader may already hold bytes the client sent right after its
+	// upgrade request — reading via bufrw (not conn directly) forwards them
+	// instead of dropping them. First side to finish tears down both (the
+	// deferred Closes), matching how the backend relay handles termination.
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(guest, bufrw)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(conn, guest)
+		done <- struct{}{}
+	}()
+	<-done
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

@@ -80,10 +80,16 @@ cp /etc/resolv.conf "$MOUNT_DIR/etc/resolv.conf"
 mount -t devtmpfs devtmpfs "$MOUNT_DIR/dev"
 
 echo "==> installing docker + containerd inside chroot"
+# iptables-legacy alongside iptables: Alpine's default iptables is the nft
+# backend, which needs CONFIG_NF_TABLES in the guest kernel. The Firecracker
+# CI 5.10 kernel (see fetch-kernel.sh) ships legacy x_tables only, so
+# without the legacy binaries dockerd can't manage NAT at all and container
+# port publishing is dead. init.sh probes which backend the running kernel
+# actually supports and repoints iptables at the legacy binaries if needed.
 chroot "$MOUNT_DIR" /bin/sh -c '
   set -e
   apk update
-  apk add --no-cache docker docker-cli containerd runc iptables iproute2 ca-certificates haveged
+  apk add --no-cache docker docker-cli containerd runc iptables iptables-legacy iproute2 ca-certificates haveged
 '
 
 echo "==> installing init.sh as PID 1"

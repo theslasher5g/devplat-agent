@@ -32,6 +32,16 @@ Each VM gets its own tap device and a private point-to-point `/30`:
   reach it — enforced both by DNAT source-matching and an explicit `DROP`
   for everyone else, in addition to this agent's own API only binding the
   WireGuard interface in the first place.
+- **Container-published ports** (Testcontainers port mapping): ports Docker
+  publishes *inside* the guest get no host-side DNAT — they're ephemeral
+  and per-container, so pre-provisioning is impossible. Instead the agent
+  exposes `GET /vms/{id}/proxy/{port}` (same Bearer auth as everything
+  else): after an HTTP `Upgrade`, the connection becomes a raw TCP pipe to
+  `<guest IP>:<port>` over the tap link. The backend's per-port tunnel
+  route (`/environments/:id/tunnel/:port`) is its only caller and applies
+  the same team-ownership check as the Docker-API tunnel; the guest IP is
+  derived strictly from the VM's slot, so a caller can pick a port but
+  never another VM.
 - **Egress**: a `tc` token-bucket bandwidth cap per tap device
   (`BANDWIDTH_CAP_MBIT`). No egress allowlist/blocklist yet — flagged as a
   known gap below, matching the work order's "first cut" scope (a bandwidth
@@ -85,10 +95,15 @@ transient issue.
    needs loop devices, mount, chroot):
    ```bash
    sudo ./image/build-golden-image.sh v1 /opt/devplat/agent/images
-   ./image/fetch-kernel.sh /opt/devplat/agent/images/vmlinux.bin
+   ./image/fetch-kernel.sh   # -> /opt/devplat/agent/images/vmlinux-5.10.239.bin
    ```
    Copy `/opt/devplat/agent/images/` to the target host (or build directly
-   on it).
+   on it). The kernel is the Firecracker project's own CI guest kernel
+   5.10.239 — see fetch-kernel.sh's header for why (container networking
+   inside the guest needs kernel netfilter/bridge/veth support the old
+   quickstart 4.14 kernel didn't have) and which iptables backend it
+   implies (legacy x_tables; the image installs `iptables-legacy` and
+   init.sh switches to it automatically).
 2. **Registry cache** (first thing that needs Docker on this host):
    ```bash
    cd deploy && docker compose -f docker-compose.registry-cache.yml up -d
@@ -163,7 +178,12 @@ patch applied to their already-built image — see the next section.
 `build-golden-image.sh` downloads Alpine and reinstalls every package from
 scratch — massive overkill for a one-file change like the `--tls=false`
 fix above. `init.sh` is just `/sbin/init` inside the image's ext4
-filesystem, so patch it directly via a loop mount instead:
+filesystem, so patch it directly via a loop mount instead. (The
+Testcontainers port-mapping change is bigger than a one-file patch — it
+needs a new guest kernel and a new package in the image; the full
+step-by-step host rollout for it is in
+`docs/rollout-testcontainers-ports.md`, including a loop-mount variant
+that avoids a full rebuild.)
 
 ```bash
 # 1. Find the image this host's agent actually loads — read it from the
@@ -203,11 +223,23 @@ while the broken one is set aside, unexamined, for later.)
 
 ## Known gaps / follow-ups
 
-- **`cgroup setup failed ... permission denied`** on every VM boot (see
-  `createCgroup`/`addProcessToCgroup` in `firecracker.go`) — logged as a
-  warning and non-fatal (the VM runs fine without the cgroup CPU/RAM cap
-  being applied), but not yet root-caused. Cosmetic for now, worth cleaning
-  up before relying on per-VM resource caps actually being enforced.
+- **`cgroup setup failed ... permission denied`** on VM boot — root-caused
+  and fixed in `cgroup.go`: on cgroup v2, `cpu.max`/`memory.max` only exist
+  in a leaf if the parent's `cgroup.subtree_control` enables those
+  controllers, which nothing ever did; `os.WriteFile`'s `O_CREATE` against
+  the missing file is what kernfs reported as "permission denied".
+  `ensureParentControllers` now enables `+cpu +memory` top-down before any
+  leaf is written. Verified in this repo's tests only as far as a sandbox
+  allows — after deploying, confirm on a real host that the warning is gone
+  and `cat /sys/fs/cgroup/devplat/<vm-id>/cpu.max` shows the plan's cap.
+  (If a host still runs a hybrid/v1 cgroup layout, the error message now
+  says so explicitly instead of "permission denied".)
+- **`WARNING: IPv4 forwarding is disabled`** in the guest's dockerd log —
+  resolved as a side effect of the port-mapping work: the warning came from
+  our own `--ip-forward=false` stopgap flag (part of the broken-iptables
+  fallback), not from any host setting. With working guest iptables,
+  dockerd runs with stock defaults and enables guest-side forwarding
+  itself.
 - **No egress allowlist/blocklist** (e.g. against known mining pools) — only
   a bandwidth cap and inbound denial, matching the explicit "first cut"
   scope in the work order.

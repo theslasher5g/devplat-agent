@@ -41,14 +41,13 @@ mkdir -p /dev/pts && mount -t devpts devpts /dev/pts 2>/dev/null || true
 echo "init.sh: /dev ready [t=$(T)]"
 
 # dockerd needs a real cgroup hierarchy to initialize its cgroup driver.
-# cgroup2 alone (tried first) didn't fix the silent hang — this guest
-# kernel is Firecracker's stock 4.14.174, and the cgroup v2 *cpu*
-# controller wasn't merged until 4.15; mounting cgroup2 here gives dockerd
-# a filesystem but not the controller files a modern dockerd's cgroupfs
-# driver expects, which plausibly explains a hang rather than a clean
-# error. cgroup v1 (per-controller hierarchies) has been stable since
-# 2.6.24 and is what dockerd has defaulted to for most of its life — far
-# safer bet on a kernel this old.
+# cgroup2 alone (tried first) didn't fix the silent hang on the original
+# 4.14 guest kernel (cgroup v2's cpu controller wasn't merged until 4.15).
+# cgroup v1 (per-controller hierarchies) has been stable since 2.6.24 and
+# is what dockerd has defaulted to for most of its life. The current 5.10
+# guest kernel supports both; v1 is kept because it's the combination that
+# has actually been proven in this guest — switching to v2 here would be
+# gratuitous churn.
 mkdir -p /sys/fs/cgroup
 mount -t tmpfs -o mode=755 cgroup_root /sys/fs/cgroup
 for ctrl in cpu cpuacct memory blkio devices freezer pids net_cls net_prio perf_event; do
@@ -73,10 +72,11 @@ echo "init.sh: /etc/resolv.conf -> $(cat /etc/resolv.conf)"
 # machine uses to seed randomness, so the kernel CRNG took ~80s to initialize
 # from scratch. dockerd's Go runtime calls getrandom(), which BLOCKS until the
 # CRNG is ready — so dockerd printed nothing and never opened its port within
-# any reasonable readiness window. (The random.trust_cpu=on kernel arg would
-# also solve this, but only on Linux 4.19+; this guest kernel is 4.14, which
-# predates that option and silently ignores it.) haveged fills the pool from
-# CPU timing jitter within a second or two, kernel-version-independently.
+# any reasonable readiness window. On the current 5.10 guest kernel the
+# random.trust_cpu=on kernel arg (already passed by the agent, and honored
+# since 4.19) fixes this on its own; haveged stays as belt-and-braces so a
+# host without RDRAND, or a future kernel swap, can't silently reintroduce
+# an 80-second boot stall.
 haveged -w 1024 2>/dev/null && echo "init.sh: haveged started [t=$(T)]" || echo "init.sh: WARNING haveged failed to start [t=$(T)]"
 echo "init.sh: entropy_avail=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo '?') [t=$(T)]"
 
@@ -127,28 +127,46 @@ fi
 # the live console output and actually shows the failure. `wait` at the end
 # keeps this script (PID 1) alive exactly as long as dockerd runs, same as
 # exec'ing it directly would have.
-# This guest kernel (4.14) predates nf_tables, so iptables' default nft
-# backend fails ("Protocol not supported") and dockerd can't build its NAT
-# chains. If a legacy (x_tables) iptables binary is available, repoint the
-# iptables commands at it — that backend 4.14 does support.
-for cmd in iptables iptables-save iptables-restore ip6tables ip6tables-save ip6tables-restore; do
-  base="${cmd%%-*}"                 # iptables / ip6tables
-  suffix="${cmd#"$base"}"           # "" / -save / -restore
-  legacy="${base}-legacy${suffix}"  # iptables-legacy / iptables-legacy-save / ...
-  lp="$(command -v "$legacy" 2>/dev/null)" || continue
-  cp="$(command -v "$cmd" 2>/dev/null)" || continue
-  ln -sf "$lp" "$cp"
-done
+# Pick an iptables backend the running kernel actually supports. Alpine's
+# default iptables is the nft backend, which needs CONFIG_NF_TABLES; the
+# Firecracker CI 5.10 guest kernel (see fetch-kernel.sh) ships legacy
+# x_tables only, so on it the nft backend fails with "Protocol not
+# supported". The image installs Alpine's iptables-legacy package precisely
+# for this: probe the default backend first, and only if it can't talk to
+# the kernel, repoint every iptables command at the legacy binaries. On a
+# future kernel with nf_tables enabled the probe succeeds and the nft
+# backend stays — nothing to change here.
+if ! iptables -t nat -L >/dev/null 2>&1; then
+  for cmd in iptables iptables-save iptables-restore ip6tables ip6tables-save ip6tables-restore; do
+    base="${cmd%%-*}"                 # iptables / ip6tables
+    suffix="${cmd#"$base"}"           # "" / -save / -restore
+    legacy="${base}-legacy${suffix}"  # iptables-legacy / iptables-legacy-save / ...
+    lp="$(command -v "$legacy" 2>/dev/null)" || continue
+    cp="$(command -v "$cmd" 2>/dev/null)" || continue
+    ln -sf "$lp" "$cp"
+  done
+fi
 
-# Decide whether dockerd can manage iptables at all. If neither nft (kernel
-# too old) nor a working legacy backend is available, start dockerd with
-# --iptables=false so the daemon still comes up — port publishing via NAT
-# won't work, but `docker version`, image pulls and containers that don't
-# need published ports do. If iptables works, leave dockerd to manage it
-# normally (full networking, needed for Testcontainers port mapping).
+# Decide whether dockerd can manage iptables at all. If neither the nft nor
+# the legacy backend works on this kernel, fall back to --iptables=false so
+# the daemon still comes up — `docker version` and image pulls work, but
+# container port publishing doesn't (this was the permanent state on the old
+# 4.14 kernel; on the 5.10 kernel it's strictly an emergency fallback).
+# When iptables works, dockerd runs with stock networking defaults:
+# --iptables=true so it builds its own DOCKER/DOCKER-USER NAT chains,
+# --ip-forward=true so it enables net.ipv4.ip_forward itself (this is the
+# guest-side forwarding the old setup's "WARNING: IPv4 forwarding is
+# disabled" complained about — that warning was caused by our explicit
+# --ip-forward=false stopgap, not by anything on the host), and the default
+# --userland-proxy=true: docker-proxy processes per published port are the
+# most battle-tested path, and unlike hairpin-NAT mode they don't depend on
+# route_localnet sysctls for guest-local access to published ports. Traffic
+# arriving on eth0 (the agent's per-port proxy dialing this VM) hits the
+# DOCKER DNAT chain either way, so the choice only affects edge cases —
+# take the default.
 if iptables -t nat -L >/dev/null 2>&1; then
   echo "init.sh: iptables works -> $(iptables --version 2>&1 | head -1); dockerd will manage NAT"
-  IPTABLES_FLAGS="--userland-proxy=false"
+  IPTABLES_FLAGS=""
 else
   echo "init.sh: WARNING iptables non-functional on this kernel; starting dockerd with --iptables=false"
   IPTABLES_FLAGS="--iptables=false --ip-forward=false --bridge=none"
