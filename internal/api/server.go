@@ -5,6 +5,7 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -42,7 +43,12 @@ func (s *Server) SetDraining(v bool) { s.draining.Store(v) }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
-	if auth != "Bearer "+s.token {
+	// Constant-time compare so a byte-by-byte timing difference can't be used
+	// to recover the token. The listener is WireGuard-only, but the per-port
+	// proxy makes a leaked token especially valuable (raw TCP into any VM on
+	// the host), so don't rely solely on the network boundary here.
+	expected := "Bearer " + s.token
+	if subtle.ConstantTimeCompare([]byte(auth), []byte(expected)) != 1 {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_agent_token"})
 		return
 	}
