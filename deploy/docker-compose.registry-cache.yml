@@ -13,9 +13,14 @@
 #
 #   docker compose -f docker-compose.registry-cache.yml up -d
 #
-# Requires a paid Docker Hub account (Docker Pro or better) to raise the
-# pull-rate limit that's already been hit once during initial VPS setup —
-# see .env.example for the two env vars this expects.
+# Docker Hub credentials are OPTIONAL. Leave DOCKERHUB_USERNAME/DOCKERHUB_TOKEN
+# unset and the cache does anonymous pull-through — the cache itself is what
+# keeps you under the limit, since repeat pulls of the same layer are served
+# from disk and never touch Docker Hub. Only the initial cold fetch of each
+# distinct layer counts against the rate limit; anonymous that's ~100 pulls
+# per 6h per IP, which a warm cache almost never reaches in steady state.
+# If you DO have credentials (even a *free* Docker Hub account raises the
+# limit above anonymous), set the two env vars in .env — see .env.example.
 
 services:
   registry-cache:
@@ -38,8 +43,11 @@ services:
       - "127.0.0.1:5001:5001"
     environment:
       REGISTRY_PROXY_REMOTEURL: https://registry-1.docker.io
-      REGISTRY_PROXY_USERNAME: ${DOCKERHUB_USERNAME}
-      REGISTRY_PROXY_PASSWORD: ${DOCKERHUB_TOKEN}
+      # Optional — see the header comment. `:-` makes them default to empty
+      # when unset, so `docker compose` doesn't warn and the proxy falls back
+      # to anonymous pull-through instead of failing.
+      REGISTRY_PROXY_USERNAME: ${DOCKERHUB_USERNAME:-}
+      REGISTRY_PROXY_PASSWORD: ${DOCKERHUB_TOKEN:-}
       # Layers are cached to disk indefinitely by default; without a TTL
       # this container's disk would only grow. 168h = 7 days.
       REGISTRY_PROXY_TTL: 168h
