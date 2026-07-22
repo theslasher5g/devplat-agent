@@ -30,6 +30,12 @@ services:
       # nothing routes to it from the public internet, since none of the
       # tap subnets are exposed there.
       - "5000:5000"
+      # Debug/expvar endpoint, bound to loopback ONLY. The devplat-agent runs
+      # directly on the host (not in a container) and scrapes
+      # http://127.0.0.1:5001/debug/vars for the registry proxy's cumulative
+      # Hits/Misses, which becomes the dashboard's image-cache hit rate. Must
+      # NOT be exposed beyond the host — it also serves pprof.
+      - "127.0.0.1:5001:5001"
     environment:
       REGISTRY_PROXY_REMOTEURL: https://registry-1.docker.io
       REGISTRY_PROXY_USERNAME: ${DOCKERHUB_USERNAME}
@@ -37,6 +43,9 @@ services:
       # Layers are cached to disk indefinitely by default; without a TTL
       # this container's disk would only grow. 168h = 7 days.
       REGISTRY_PROXY_TTL: 168h
+      # Enables the expvar/pprof debug listener the agent scrapes for cache
+      # stats (see the 5001 loopback port mapping above).
+      REGISTRY_HTTP_DEBUG_ADDR: ":5001"
     volumes:
       - registry-cache-data:/var/lib/registry
 

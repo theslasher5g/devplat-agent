@@ -89,7 +89,7 @@ func TestProxyPort_PipesBothWays(t *testing.T) {
 		_, _ = conn.Write([]byte("echo:" + line))
 	}()
 
-	srv := httptest.NewServer(api.NewServer(m, testToken))
+	srv := httptest.NewServer(api.NewServer(m, testToken, ""))
 	defer srv.Close()
 
 	conn, err := net.Dial("tcp", strings.TrimPrefix(srv.URL, "http://"))
@@ -126,7 +126,7 @@ func TestProxyPort_PipesBothWays(t *testing.T) {
 
 func TestProxyPort_Errors(t *testing.T) {
 	m, vm := newTestManager(t)
-	srv := httptest.NewServer(api.NewServer(m, testToken))
+	srv := httptest.NewServer(api.NewServer(m, testToken, ""))
 	defer srv.Close()
 
 	get := func(path, token string) int {

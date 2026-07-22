@@ -54,6 +54,11 @@ type Config struct {
 	WireguardCIDR     string // e.g. 10.10.0.0/24 — the only source allowed to reach VM docker ports
 	BandwidthCapMbit  int
 	RegistryMirrorURL string // e.g. http://127.0.0.1:5000, baked into each VM's docker daemon.json
+	// RegistryMetricsURL is the pull-through cache's expvar debug endpoint,
+	// scraped for the image-cache hit rate reported to the scheduler. Defaults
+	// to the local registry container's debug port; set empty to disable (the
+	// host then reports no cache metric, and the dashboard shows none for it).
+	RegistryMetricsURL string
 }
 
 func requiredString(name string) (string, error) {
@@ -110,6 +115,7 @@ func Load() (Config, error) {
 	cfg.FirecrackerBinary = envOr("FIRECRACKER_BINARY", "/usr/local/bin/firecracker")
 	cfg.VMStateDir = envOr("VM_STATE_DIR", "/var/lib/devplat/vms")
 	cfg.RegistryMirrorURL = envOr("REGISTRY_MIRROR_URL", "")
+	cfg.RegistryMetricsURL = envOr("REGISTRY_METRICS_URL", "http://127.0.0.1:5001/debug/vars")
 
 	heartbeatSeconds, err := intEnv("HEARTBEAT_INTERVAL_SECONDS", 20)
 	if err != nil {

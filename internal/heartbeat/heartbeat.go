@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/theslasher5g/devplat-agent/internal/regmetrics"
 	"github.com/theslasher5g/devplat-agent/internal/vmmanager"
 )
 
@@ -24,21 +25,30 @@ type payload struct {
 	RAMUsedMb     int64 `json:"ramUsedMb"`
 	ActiveVMCount int   `json:"activeVmCount"`
 	Draining      bool  `json:"draining"`
+	// Cumulative registry-cache counters, omitted when the cache's debug
+	// endpoint is unreachable (nil), so the scheduler distinguishes "no data"
+	// from a real zero.
+	CacheLookups *uint64 `json:"cacheLookups,omitempty"`
+	CacheHits    *uint64 `json:"cacheHits,omitempty"`
 }
 
-func Start(ctx context.Context, manager *vmmanager.Manager, schedulerURL, token string, interval time.Duration, draining *atomic.Bool) {
+func Start(ctx context.Context, manager *vmmanager.Manager, schedulerURL, token, registryMetricsURL string, interval time.Duration, draining *atomic.Bool) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	send := func() {
 		h := manager.Health()
-		body, err := json.Marshal(payload{
+		p := payload{
 			CPUUsed:       h.CPUUsed,
 			RAMUsedMb:     h.RAMUsedMb,
 			ActiveVMCount: h.ActiveVMCount,
 			Draining:      draining.Load(),
-		})
+		}
+		if total, hits, ok := regmetrics.Scrape(ctx, registryMetricsURL); ok {
+			p.CacheLookups, p.CacheHits = &total, &hits
+		}
+		body, err := json.Marshal(p)
 		if err != nil {
 			log.Printf("[heartbeat] marshal failed: %v", err)
 			return

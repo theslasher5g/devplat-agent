@@ -37,12 +37,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	server := api.NewServer(manager, cfg.AgentToken)
+	server := api.NewServer(manager, cfg.AgentToken, cfg.RegistryMetricsURL)
 	httpServer := &http.Server{Addr: cfg.ListenAddr, Handler: server}
 
 	var draining atomic.Bool
 	go reaper.Start(ctx, manager, time.Duration(cfg.ReaperIntervalSeconds)*time.Second)
-	go heartbeat.Start(ctx, manager, cfg.SchedulerURL, cfg.AgentToken, cfg.HeartbeatInterval, &draining)
+	go heartbeat.Start(ctx, manager, cfg.SchedulerURL, cfg.AgentToken, cfg.RegistryMetricsURL, cfg.HeartbeatInterval, &draining)
 
 	go func() {
 		log.Printf("devplat-agent listening on %s (WireGuard-only — do not expose publicly)", cfg.ListenAddr)

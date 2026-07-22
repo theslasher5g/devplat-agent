@@ -108,6 +108,16 @@ transient issue.
    ```bash
    cd deploy && docker compose -f docker-compose.registry-cache.yml up -d
    ```
+   The compose file enables the registry's expvar debug endpoint on
+   `127.0.0.1:5001` (loopback only); the agent scrapes it
+   (`REGISTRY_METRICS_URL`, default `http://127.0.0.1:5001/debug/vars`) for
+   the cumulative cache hit/miss counters it reports to the scheduler, which
+   become the dashboard's image-cache hit rate. On a host whose registry
+   cache was started before this change, `docker compose ... up -d` again
+   picks up the new port/env. Verify on the host with:
+   `curl -s http://127.0.0.1:5001/debug/vars | jq .registry.proxy`
+   (expects `Requests`/`Hits`/`Misses`). If empty, no cache metric is
+   reported and the dashboard simply shows none — nothing else breaks.
 3. **Register the host** with the backend (as a platform admin):
    ```bash
    curl -X POST https://api.devplat.ch/admin/hosts \

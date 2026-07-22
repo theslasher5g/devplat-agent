@@ -16,21 +16,23 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/theslasher5g/devplat-agent/internal/regmetrics"
 	"github.com/theslasher5g/devplat-agent/internal/vmmanager"
 )
 
 type Server struct {
-	manager *vmmanager.Manager
-	token   string
-	mux     *http.ServeMux
+	manager            *vmmanager.Manager
+	token              string
+	registryMetricsURL string
+	mux                *http.ServeMux
 	// draining flips to true on SIGTERM (see cmd/agent/main.go) — new VM
 	// creation is refused and it's reported on GET /health so the scheduler
 	// stops assigning here without existing VMs being force-killed.
 	draining atomic.Bool
 }
 
-func NewServer(manager *vmmanager.Manager, token string) *Server {
-	s := &Server{manager: manager, token: token, mux: http.NewServeMux()}
+func NewServer(manager *vmmanager.Manager, token, registryMetricsURL string) *Server {
+	s := &Server{manager: manager, token: token, registryMetricsURL: registryMetricsURL, mux: http.NewServeMux()}
 	s.mux.HandleFunc("POST /vms", s.handleCreateVM)
 	s.mux.HandleFunc("DELETE /vms/{id}", s.handleDeleteVM)
 	s.mux.HandleFunc("GET /vms", s.handleListVMs)
@@ -237,14 +239,22 @@ func (s *Server) handleProxyPort(w http.ResponseWriter, r *http.Request) {
 	<-done
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	h := s.manager.Health()
-	writeJSON(w, http.StatusOK, map[string]any{
+	body := map[string]any{
 		"cpu_total":       h.CPUTotal,
 		"cpu_used":        h.CPUUsed,
 		"ram_total_mb":    h.RAMTotalMb,
 		"ram_used_mb":     h.RAMUsedMb,
 		"active_vm_count": h.ActiveVMCount,
 		"draining":        s.draining.Load(),
-	})
+	}
+	// Registry-cache hit counters, when the local cache's debug endpoint is
+	// reachable. Omitted entirely otherwise so the poller sees "no data" and
+	// leaves the host's stored counters untouched rather than zeroing them.
+	if total, hits, ok := regmetrics.Scrape(r.Context(), s.registryMetricsURL); ok {
+		body["cache_lookups"] = total
+		body["cache_hits"] = hits
+	}
+	writeJSON(w, http.StatusOK, body)
 }
